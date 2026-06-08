@@ -1,0 +1,24 @@
+[package]
+name = "rustcraft"
+version = "0.1.0"
+edition = "2021"
+description = "A modern Rust SDK for Minecraft — bots, worlds, and protocols"
+license = "Unlicense"
+
+[lib]
+name = "rustcraft"
+path = "src/lib.rs"
+
+[dependencies]
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes = "0.8"
+sha1 = "0.10"
+rsa = "0.9"
+rand = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+base64 = "0.22"

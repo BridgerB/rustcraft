@@ -1,0 +1,7 @@
+/target
+
+# Datagen working files (the ~60MB server JAR and generated reports).
+/datagen/work
+
+# Generated registry data — regenerate with `cargo run --bin datagen`.
+/data
