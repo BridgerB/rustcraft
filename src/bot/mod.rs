@@ -1055,6 +1055,10 @@ impl<'a> Bot<'a> {
                 -1.0,
                 Duration::from_millis(2000),
             );
+            if std::env::var("GOTO_DEBUG").is_ok() && retries == 0 {
+                let end = result.path.last().map(|m| (m.x, m.y, m.z));
+                eprintln!("GOTO from {start:?} status={:?} len={} end={end:?}", result.status, result.path.len());
+            }
             if result.path.is_empty() {
                 if result.status == PathStatus::NoPath {
                     self.clear_control_states();
@@ -1123,7 +1127,11 @@ impl<'a> Bot<'a> {
             let dz = next.z as f64 + 0.5 - p.z;
             let dy = next.y as f64 - p.y;
 
-            if dx * dx + dz * dz <= 0.49 && dy.abs() < 1.5 {
+            // Reached the waypoint only when at/above its level (dy <= 0.6) —
+            // for an upward step this forces the bot to actually CLIMB before
+            // advancing (a loose dy tolerance let it skip climbs and stall at the
+            // base of ledges); for a drop it's already above, so it advances.
+            if dx * dx + dz * dz <= 0.49 && dy <= 0.6 {
                 idx += 1;
                 dig_progress = 0;
                 last_progress = Instant::now();
