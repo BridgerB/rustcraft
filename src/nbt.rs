@@ -769,10 +769,17 @@ pub fn read_anonymous(
     if id == 0 {
         return Ok((None, 1));
     }
-    if id != NbtType::Compound.id() {
-        return Err(NbtError::ExpectedCompound(id));
-    }
-    let value = r.read_compound()?;
+    let ty = NbtType::from_id(id).ok_or(NbtError::UnknownTagId(id))?;
+    // Network text components may be a bare non-compound tag (e.g. a string).
+    // Wrap those under the "" key so consumers can read them uniformly.
+    let value = if ty == NbtType::Compound {
+        r.read_compound()?
+    } else {
+        let payload = r.read_payload(ty)?;
+        let mut c = NbtCompound::new();
+        c.insert("", payload);
+        c
+    };
     Ok((
         Some(NbtRoot {
             name: String::new(),
