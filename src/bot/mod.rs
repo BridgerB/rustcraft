@@ -922,21 +922,25 @@ impl<'a> Bot<'a> {
         if dist > 5.5 {
             return Ok(false);
         }
-        // Close enough to reach directly — dig the target (a raycast at point
-        // blank often misfires to an adjacent block).
-        if dist <= 2.6 {
-            self.dig(x, y, z).await?;
-            return Ok(true);
-        }
         self.look_at(center);
         self.wait_ticks(2).await?;
         let dir = d.scale(1.0 / dist.max(1e-6));
+        // Raycast to whatever's actually in the way; if it's adjacent to the
+        // target (an occluding leaf right next to it) or the target itself, dig
+        // it — this clears leaves blocking a trunk and tunnels through.
         let (bx, by, bz) = match raycast(&self.world, eye, dir, dist + 0.6, None) {
             Some(hit) => (hit.position.x.floor() as i32, hit.position.y.floor() as i32, hit.position.z.floor() as i32),
             None => (x, y, z),
         };
+        // If the ray stopped short of the target but the target is point-blank
+        // and we can see it directly, just dig the target.
+        let hit_is_target = (bx, by, bz) == (x, y, z);
+        if !hit_is_target && dist <= 2.0 && self.can_see_block(x, y, z) {
+            self.dig(x, y, z).await?;
+            return Ok(true);
+        }
         self.dig(bx, by, bz).await?;
-        Ok((bx, by, bz) == (x, y, z))
+        Ok(hit_is_target)
     }
 
     /// The block face nearest the bot: 0 bottom, 1 top, 2 north(-z), 3 south(+z),
