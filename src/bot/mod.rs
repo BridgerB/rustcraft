@@ -883,7 +883,7 @@ impl<'a> Bot<'a> {
         let cap = if time.is_zero() {
             Duration::ZERO
         } else {
-            (time * 2 + Duration::from_secs(2)).min(Duration::from_secs(10))
+            (time * 2 + Duration::from_secs(2)).min(Duration::from_secs(5))
         };
         let deadline = Instant::now() + cap;
         while Instant::now() < deadline {
