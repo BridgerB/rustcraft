@@ -133,6 +133,10 @@ pub struct Bot<'a> {
     pub held_slot: i32,
     pub control_state: ControlState,
     pub physics_enabled: bool,
+    /// Movement rules for pathfinding. Defaults to `max_drop_down = 1` so the
+    /// bot never takes a one-way drop it can't climb back up (surface-safe);
+    /// raise it for tasks that deliberately descend (e.g. mining).
+    pub movement: MovementsConfig,
 
     next_action_id: i32,
     /// Bumped on every inventory/window slot update from the server.
@@ -188,6 +192,7 @@ impl<'a> Bot<'a> {
             held_slot: 0,
             control_state: ControlState::default(),
             physics_enabled: true,
+            movement: MovementsConfig { max_drop_down: 1, ..MovementsConfig::default() },
             physics: None,
             should_physics: false,
             last_tick: Instant::now(),
@@ -1013,7 +1018,7 @@ impl<'a> Bot<'a> {
                 &self.world,
                 start,
                 goal,
-                MovementsConfig::default(),
+                self.movement.clone(),
                 -1.0,
                 Duration::from_millis(2000),
             );
@@ -1068,11 +1073,17 @@ impl<'a> Bot<'a> {
             }
         }
 
+        let follow_start = Instant::now();
         let mut last_progress = Instant::now();
         let mut dig_progress = 0usize;
         let mut last_xz = (self.entity.position.x, self.entity.position.z);
         let mut stuck_ticks = 0u32;
         while idx < path.len() {
+            // Hard cap so one path segment can't exceed the overall goto budget.
+            if follow_start.elapsed() > Duration::from_secs(12) {
+                self.clear_control_states();
+                return Ok(FollowOutcome::NeedRepath);
+            }
             let next = &path[idx];
             let p = self.entity.position;
             let dx = next.x as f64 + 0.5 - p.x;
@@ -1117,18 +1128,19 @@ impl<'a> Bot<'a> {
                 return Ok(FollowOutcome::Disconnected);
             }
 
-            // Track whether we're actually moving horizontally.
+            // Track horizontal movement only to drive anti-wedge jumping; the
+            // re-path timer (`last_progress`) advances solely when a WAYPOINT is
+            // reached, so oscillating near an unreachable node still times out.
             let np = self.entity.position;
             let moved = (np.x - last_xz.0).powi(2) + (np.z - last_xz.1).powi(2);
             if moved > 0.0025 {
                 last_xz = (np.x, np.z);
                 stuck_ticks = 0;
-                last_progress = Instant::now();
             } else {
                 stuck_ticks += 1;
             }
 
-            // Give up this path after ~2.5 s with no progress → recompute.
+            // Give up this path after ~2.5 s without reaching the next waypoint.
             if last_progress.elapsed() > Duration::from_millis(2500) {
                 self.clear_control_states();
                 return Ok(FollowOutcome::NeedRepath);
