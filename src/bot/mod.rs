@@ -872,7 +872,15 @@ impl<'a> Bot<'a> {
             .await?;
         self.swing_arm().await?;
 
-        let deadline = Instant::now() + time;
+        // Keep digging until the block actually breaks. The break-time estimate
+        // can be off (the datagen lacks exact hardness), so dig until the server
+        // turns the block to air, capped generously.
+        let cap = if time.is_zero() {
+            Duration::ZERO
+        } else {
+            (time * 2 + Duration::from_secs(2)).min(Duration::from_secs(10))
+        };
+        let deadline = Instant::now() + cap;
         while Instant::now() < deadline {
             self.look_at(center); // keep facing the block while mining
             self.swing_arm().await?;
@@ -1062,6 +1070,8 @@ impl<'a> Bot<'a> {
 
         let mut last_progress = Instant::now();
         let mut dig_progress = 0usize;
+        let mut last_xz = (self.entity.position.x, self.entity.position.z);
+        let mut stuck_ticks = 0u32;
         while idx < path.len() {
             let next = &path[idx];
             let p = self.entity.position;
@@ -1094,20 +1104,34 @@ impl<'a> Bot<'a> {
                 return Ok(FollowOutcome::NeedRepath);
             }
 
-            // Walk toward the waypoint; jump to step up or for parkour.
+            // Walk toward the waypoint; jump to step up, for parkour, or to clear
+            // a lip when we've stopped making horizontal progress (anti-wedge).
             let mx = next.x as f64 + 0.5 - p.x;
             let mz = next.z as f64 + 0.5 - p.z;
             self.look((-mx).atan2(-mz), 0.0);
             self.set_control_state("forward", true);
             self.set_control_state("sprint", true);
-            self.set_control_state("jump", next.parkour || next.y as f64 > p.y + 0.5);
+            self.set_control_state("jump", next.parkour || next.y as f64 > p.y + 0.5 || stuck_ticks >= 5);
 
-            if last_progress.elapsed() > Duration::from_millis(3500) {
-                self.clear_control_states();
-                return Ok(FollowOutcome::NeedRepath);
-            }
             if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
                 return Ok(FollowOutcome::Disconnected);
+            }
+
+            // Track whether we're actually moving horizontally.
+            let np = self.entity.position;
+            let moved = (np.x - last_xz.0).powi(2) + (np.z - last_xz.1).powi(2);
+            if moved > 0.0025 {
+                last_xz = (np.x, np.z);
+                stuck_ticks = 0;
+                last_progress = Instant::now();
+            } else {
+                stuck_ticks += 1;
+            }
+
+            // Give up this path after ~2.5 s with no progress → recompute.
+            if last_progress.elapsed() > Duration::from_millis(2500) {
+                self.clear_control_states();
+                return Ok(FollowOutcome::NeedRepath);
             }
         }
         self.clear_control_states();
