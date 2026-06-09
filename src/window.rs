@@ -41,6 +41,8 @@ pub struct Window {
     pub crafting_result_slot: i32,
     pub requires_confirmation: bool,
     pub selected_item: Option<Item>,
+    /// Server-sent state id, echoed back in `container_click` (1.17+).
+    pub state_id: i32,
 }
 
 fn with_count(registry: &Registry, item: &Item, count: i32) -> Item {
@@ -87,6 +89,7 @@ impl Window {
             crafting_result_slot,
             requires_confirmation,
             selected_item: None,
+            state_id: 0,
         }
     }
 

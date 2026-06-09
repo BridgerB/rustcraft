@@ -6,6 +6,8 @@
 //! 50 ms physics deadline, so keep-alive + physics keep running while waiting.
 
 mod conversions;
+mod crafting;
+mod inventory;
 
 pub use conversions::*;
 
@@ -117,10 +119,15 @@ pub struct Bot<'a> {
     pub world: World<'a>,
     pub entities: HashMap<i32, Entity>,
     pub inventory: Window,
+    /// Currently-open container window (chest/furnace/crafting table), if any.
+    pub current_window: Option<Window>,
     pub held_slot: i32,
     pub control_state: ControlState,
     pub physics_enabled: bool,
 
+    next_action_id: i32,
+    /// Bumped on every inventory/window slot update from the server.
+    inv_revision: u32,
     physics: Option<PhysicsEngine>,
     should_physics: bool,
     last_tick: Instant,
@@ -147,7 +154,11 @@ impl<'a> Bot<'a> {
         let mut entity = Entity::new(0);
         entity.health = 20.0;
         Ok(Bot {
-            inventory: Window::new(0, "minecraft:inventory", "", 46, 9, 44, 0, true),
+            inventory: crate::window::create_window_from_type(registry, 0, -1, Some("minecraft:inventory"), "Inventory", None)
+                .unwrap_or_else(|| Window::new(0, "minecraft:inventory", "", 46, 9, 44, 0, true)),
+            current_window: None,
+            next_action_id: 0,
+            inv_revision: 0,
             world: World::new(registry),
             registry,
             entity,
@@ -387,7 +398,7 @@ impl<'a> Bot<'a> {
                     return Ok(Some(BotEvent::BlockUpdate(x, y, z)));
                 }
             }
-            "set_carried_item" => {
+            "set_held_slot" => {
                 if let Some(s) = params.get("slot").and_then(PValue::as_i32) {
                     self.held_slot = s;
                 }
@@ -398,6 +409,23 @@ impl<'a> Bot<'a> {
             }
             "container_set_slot" => {
                 self.handle_inventory_slot(params);
+            }
+            "set_player_inventory" => {
+                if let (Some(slot), Some(item)) =
+                    (params.get("slotId").and_then(PValue::as_i32), params.get("contents"))
+                {
+                    let i = slot as usize;
+                    if i < self.inventory.slots.len() {
+                        self.inventory.slots[i] = from_notch(self.registry, item);
+                    }
+                }
+            }
+            "open_screen" => {
+                self.handle_open_screen(params);
+            }
+            "container_close" => {
+                self.sync_window_to_inventory();
+                self.current_window = None;
             }
             "add_entity" => {
                 let id = params.get("entityId").and_then(PValue::as_i32).unwrap_or(0);
@@ -579,27 +607,89 @@ impl<'a> Bot<'a> {
         }
     }
 
-    fn handle_inventory_content(&mut self, params: &PValue) {
-        if params.get("windowId").and_then(PValue::as_i32).unwrap_or(-1) != 0 {
-            return;
+    /// Choose which window a packet's `windowId` targets.
+    fn window_for(&mut self, window_id: i32) -> Option<&mut Window> {
+        if window_id == 0 || window_id == -1 {
+            Some(&mut self.inventory)
+        } else if self.current_window.as_ref().map(|w| w.id) == Some(window_id) {
+            self.current_window.as_mut()
+        } else {
+            None
         }
+    }
+
+    fn handle_inventory_content(&mut self, params: &PValue) {
+        self.inv_revision = self.inv_revision.wrapping_add(1);
+        let window_id = params.get("windowId").and_then(PValue::as_i32).unwrap_or(-1);
+        let state_id = params.get("stateId").and_then(PValue::as_i32);
+        let registry = self.registry;
+        let Some(window) = self.window_for(window_id) else {
+            return;
+        };
         if let Some(items) = params.get("items").and_then(PValue::as_list) {
             for (i, slot) in items.iter().enumerate() {
-                if i < self.inventory.slots.len() {
-                    self.inventory.slots[i] = from_notch(self.registry, slot);
+                if i < window.slots.len() {
+                    window.slots[i] = from_notch(registry, slot);
+                }
+            }
+        }
+        if let Some(sid) = state_id {
+            window.state_id = sid;
+        }
+        // Clear any items stuck in the 2x2 crafting grid after a resync.
+        if window_id == 0 {
+            for s in 1..=4 {
+                if self.inventory.slots[s].is_some() {
+                    for dest in 9..45 {
+                        if self.inventory.slots[dest].is_none() {
+                            self.inventory.slots[dest] = self.inventory.slots[s].take();
+                            break;
+                        }
+                    }
                 }
             }
         }
     }
 
     fn handle_inventory_slot(&mut self, params: &PValue) {
-        if params.get("windowId").and_then(PValue::as_i32).unwrap_or(-1) != 0 {
+        self.inv_revision = self.inv_revision.wrapping_add(1);
+        let window_id = params.get("windowId").and_then(PValue::as_i32).unwrap_or(-1);
+        let state_id = params.get("stateId").and_then(PValue::as_i32);
+        let registry = self.registry;
+        let Some(slot) = params.get("slot").and_then(PValue::as_i32) else {
             return;
+        };
+        let item = params.get("item");
+        let Some(window) = self.window_for(window_id) else {
+            return;
+        };
+        let i = slot as usize;
+        if i < window.slots.len() {
+            window.slots[i] = item.and_then(|it| from_notch(registry, it));
         }
-        if let (Some(slot), Some(item)) = (params.get("slot").and_then(PValue::as_i32), params.get("item")) {
-            let i = slot as usize;
-            if i < self.inventory.slots.len() {
-                self.inventory.slots[i] = from_notch(self.registry, item);
+        if let Some(sid) = state_id {
+            window.state_id = sid;
+        }
+    }
+
+    fn handle_open_screen(&mut self, params: &PValue) {
+        let window_id = params.get("windowId").and_then(PValue::as_i32).unwrap_or(0);
+        let type_id = params.get("inventoryType").and_then(PValue::as_i64).unwrap_or(0);
+        let title = params.get("windowTitle").and_then(PValue::as_str).unwrap_or("").to_string();
+        self.current_window =
+            crate::window::create_window_from_type(self.registry, window_id, type_id, None, &title, None);
+    }
+
+    /// Copy a closing container's inventory section back into the player inventory.
+    fn sync_window_to_inventory(&mut self) {
+        if let Some(w) = self.current_window.take() {
+            let inv_len = w.inventory_end - w.inventory_start;
+            for i in 0..inv_len {
+                let cs = w.inventory_start + i;
+                let ps = self.inventory.inventory_start + i;
+                if cs < w.slots.len() && ps < self.inventory.slots.len() {
+                    self.inventory.slots[ps] = w.slots[cs].clone();
+                }
             }
         }
     }
@@ -751,7 +841,12 @@ impl<'a> Bot<'a> {
     /// Dig the block at (x,y,z): face it, send start, wait the break time while
     /// swinging, then send finish.
     pub async fn dig(&mut self, x: i32, y: i32, z: i32) -> std::io::Result<()> {
-        self.look_at(vec3(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5));
+        let center = vec3(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
+        let face = self.dig_face(x, y, z);
+        // Face the block and push that look to the server before starting — the
+        // server validates the player is looking at the block.
+        self.look_at(center);
+        self.wait_ticks(2).await?;
         let time = self.dig_time(x, y, z);
         self.sequence += 1;
         let seq = self.sequence;
@@ -761,7 +856,7 @@ impl<'a> Bot<'a> {
                 PValue::compound(vec![
                     ("status", PValue::num(0.0)),
                     ("location", block_pos(x, y, z)),
-                    ("face", PValue::num(1.0)),
+                    ("face", PValue::num(face as f64)),
                     ("sequence", PValue::num(seq as f64)),
                 ]),
             )
@@ -770,8 +865,9 @@ impl<'a> Bot<'a> {
 
         let deadline = Instant::now() + time;
         while Instant::now() < deadline {
+            self.look_at(center); // keep facing the block while mining
             self.swing_arm().await?;
-            self.wait_ticks(7).await?;
+            self.wait_ticks(5).await?;
             if self.block_state_at(x, y, z) == 0 {
                 break;
             }
@@ -785,11 +881,28 @@ impl<'a> Bot<'a> {
                 PValue::compound(vec![
                     ("status", PValue::num(2.0)),
                     ("location", block_pos(x, y, z)),
-                    ("face", PValue::num(1.0)),
+                    ("face", PValue::num(face as f64)),
                     ("sequence", PValue::num(fseq as f64)),
                 ]),
             )
             .await
+    }
+
+    /// The block face nearest the bot: 0 bottom, 1 top, 2 north(-z), 3 south(+z),
+    /// 4 west(-x), 5 east(+x).
+    fn dig_face(&self, x: i32, y: i32, z: i32) -> i32 {
+        let eye = vec3(self.entity.position.x, self.entity.position.y + 1.62, self.entity.position.z);
+        let d = eye.subtract(vec3(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5));
+        let (ax, ay, az) = (d.x.abs(), d.y.abs(), d.z.abs());
+        if ay >= ax && ay >= az {
+            if d.y >= 0.0 { 1 } else { 0 }
+        } else if ax >= az {
+            if d.x >= 0.0 { 5 } else { 4 }
+        } else if d.z >= 0.0 {
+            3
+        } else {
+            2
+        }
     }
 
     /// Estimated break time for the block at (x,y,z).
