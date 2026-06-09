@@ -146,6 +146,15 @@ impl<'a> Bot<'a> {
             let (inv_start, inv_end) = self.active_inventory_range();
             self.put_selected_item_range(inv_start, inv_end, original_source.unwrap_or(0)).await?;
 
+            // Wait for the server to compute and send the crafting result into
+            // slot 0 before taking it (else we'd grab an empty slot).
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+            while self.active_slot(0).is_none() && std::time::Instant::now() < deadline {
+                if matches!(self.drive_tick().await?, super::DriveStep::Disconnected) {
+                    return Ok(());
+                }
+            }
+
             self.put_away(0).await?; // take the crafted result
 
             for s in 0..=(w * h) as i32 {
