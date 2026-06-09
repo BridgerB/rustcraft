@@ -922,6 +922,12 @@ impl<'a> Bot<'a> {
         if dist > 5.5 {
             return Ok(false);
         }
+        // Close enough to reach directly — dig the target (a raycast at point
+        // blank often misfires to an adjacent block).
+        if dist <= 2.6 {
+            self.dig(x, y, z).await?;
+            return Ok(true);
+        }
         self.look_at(center);
         self.wait_ticks(2).await?;
         let dir = d.scale(1.0 / dist.max(1e-6));
