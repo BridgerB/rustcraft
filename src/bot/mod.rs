@@ -192,7 +192,7 @@ impl<'a> Bot<'a> {
             held_slot: 0,
             control_state: ControlState::default(),
             physics_enabled: true,
-            movement: MovementsConfig { max_drop_down: 1, ..MovementsConfig::default() },
+            movement: MovementsConfig { liquid_cost: 100.0, ..MovementsConfig::default() }, // steve config: default drops + digging
             physics: None,
             should_physics: false,
             last_tick: Instant::now(),
