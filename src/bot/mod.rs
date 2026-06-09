@@ -18,7 +18,7 @@ use crate::block::{state_id_to_block, BlockInfo};
 use crate::chunk::{ChunkColumn, ChunkColumnOptions, GLOBAL_BITS_PER_BIOME, GLOBAL_BITS_PER_BLOCK};
 use crate::entity::Entity;
 use crate::item::{from_notch, Item};
-use crate::path::{get_path_to, GoalNear, MovementsConfig, PathStatus};
+use crate::path::{get_path_to, Goal, GoalNear, GoalNearXZ, Move, MovementsConfig, PathStatus};
 use crate::physics::{
     apply_player_state, create_player_state, PhysicsEngine, PhysicsWorld, PlayerControls,
     WorldPhysics,
@@ -70,6 +70,15 @@ pub struct ControlState {
     pub jump: bool,
     pub sprint: bool,
     pub sneak: bool,
+}
+
+/// Result of following one computed path segment.
+enum FollowOutcome {
+    /// Reached the end of the path.
+    Reached,
+    /// Stuck or blocked — the caller should recompute a path.
+    NeedRepath,
+    Disconnected,
 }
 
 /// Outcome of one [`Bot::drive_tick`].
@@ -947,58 +956,162 @@ impl<'a> Bot<'a> {
             .await
     }
 
-    /// Walk to within ~1 block of (x,y,z) using A* + the physics engine.
-    /// Returns `true` if it arrived.
+    /// Walk to within ~2 blocks of (x,y,z). Returns `true` if the goal is met.
     pub async fn goto(&mut self, x: i32, y: i32, z: i32) -> std::io::Result<bool> {
-        let start = (
-            self.entity.position.x.floor() as i32,
-            self.entity.position.y.floor() as i32,
-            self.entity.position.z.floor() as i32,
-        );
-        let goal = GoalNear::new(x as f64, y as f64, z as f64, 1.0);
-        let result = get_path_to(&self.world, start, &goal, MovementsConfig::default(), 256.0, Duration::from_secs(5));
-        if result.status != PathStatus::Success && result.path.is_empty() {
-            return Ok(false);
+        let goal = GoalNear::new(x as f64, y as f64, z as f64, 2.0);
+        self.goto_goal(&goal, Duration::from_secs(18)).await
+    }
+
+    /// Walk to within `range` blocks of (x,y,z).
+    pub async fn goto_near(&mut self, x: i32, y: i32, z: i32, range: f64) -> std::io::Result<bool> {
+        let goal = GoalNear::new(x as f64, y as f64, z as f64, range);
+        self.goto_goal(&goal, Duration::from_secs(18)).await
+    }
+
+    /// Walk to within `range` blocks horizontally of (x,z) — at any reachable Y.
+    /// Use for descending to something (e.g. a tree column in a valley).
+    pub async fn goto_xz(&mut self, x: i32, z: i32, range: f64) -> std::io::Result<bool> {
+        let goal = GoalNearXZ::new(x as f64, z as f64, range);
+        self.goto_goal(&goal, Duration::from_secs(18)).await
+    }
+
+    fn goal_reached(&self, goal: &dyn Goal) -> bool {
+        let p = self.entity.position;
+        goal.is_end(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
+    }
+
+    /// Navigate to a goal: compute an A* path, follow it (digging obstacles,
+    /// jumping, dropping), and re-path when stuck or the path runs out before the
+    /// goal. Single-task port of typecraft's tick-driven pathfinder follower.
+    pub async fn goto_goal(&mut self, goal: &dyn Goal, timeout: Duration) -> std::io::Result<bool> {
+        let started = Instant::now();
+        let mut retries = 0;
+        loop {
+            if self.goal_reached(goal) {
+                self.clear_control_states();
+                self.wait_ticks(2).await?;
+                return Ok(true);
+            }
+            if started.elapsed() > timeout {
+                self.clear_control_states();
+                return Ok(self.goal_reached(goal));
+            }
+            let start = (
+                self.entity.position.x.floor() as i32,
+                self.entity.position.y.floor() as i32,
+                self.entity.position.z.floor() as i32,
+            );
+            let result = get_path_to(
+                &self.world,
+                start,
+                goal,
+                MovementsConfig::default(),
+                -1.0,
+                Duration::from_millis(2000),
+            );
+            if result.path.is_empty() {
+                if result.status == PathStatus::NoPath {
+                    self.clear_control_states();
+                    return Ok(false);
+                }
+                retries += 1;
+                if retries > 6 {
+                    self.clear_control_states();
+                    return Ok(false);
+                }
+                self.wait_ticks(4).await?;
+                continue;
+            }
+            match self.follow_path(&result.path).await? {
+                FollowOutcome::Reached => {
+                    // Reached the path's end; loop re-checks the goal / re-paths.
+                    retries += 1;
+                    if retries > 12 {
+                        self.clear_control_states();
+                        return Ok(self.goal_reached(goal));
+                    }
+                }
+                FollowOutcome::NeedRepath => {
+                    retries += 1;
+                    if retries > 12 {
+                        self.clear_control_states();
+                        return Ok(self.goal_reached(goal));
+                    }
+                }
+                FollowOutcome::Disconnected => return Ok(false),
+            }
+        }
+    }
+
+    /// Follow a fixed path until it ends, the bot gets stuck, or it needs to
+    /// place a block (unsupported → re-path). Digs `to_break` blocks in the way.
+    async fn follow_path(&mut self, path: &[Move]) -> std::io::Result<FollowOutcome> {
+        // Start at the waypoint nearest the bot (skip already-passed nodes).
+        let p = self.entity.position;
+        let mut idx = 0;
+        let mut best = f64::MAX;
+        for (i, m) in path.iter().enumerate() {
+            let dx = m.x as f64 + 0.5 - p.x;
+            let dz = m.z as f64 + 0.5 - p.z;
+            let d = dx * dx + dz * dz;
+            if d < best {
+                best = d;
+                idx = i;
+            }
         }
 
-        self.set_control_state("sprint", true);
-        for node in &result.path {
-            let target = vec3(node.x as f64 + 0.5, node.y as f64, node.z as f64 + 0.5);
-            let mut ticks_without_progress = 0u32;
-            let mut best = self.entity.position.distance_xz(target);
-            loop {
-                self.look_at(vec3(target.x, self.entity.position.y, target.z));
-                self.set_control_state("forward", true);
-                let need_jump = node.y as f64 > self.entity.position.y + 0.4;
-                self.set_control_state("jump", need_jump);
+        let mut last_progress = Instant::now();
+        let mut dig_progress = 0usize;
+        while idx < path.len() {
+            let next = &path[idx];
+            let p = self.entity.position;
+            let dx = next.x as f64 + 0.5 - p.x;
+            let dz = next.z as f64 + 0.5 - p.z;
+            let dy = next.y as f64 - p.y;
 
-                match self.drive_tick().await? {
-                    DriveStep::Disconnected => return Ok(false),
-                    DriveStep::Tick => {
-                        let dxz = self.entity.position.distance_xz(target);
-                        let dy = (self.entity.position.y - node.y as f64).abs();
-                        if dxz < 0.4 && dy < 1.2 {
-                            break;
-                        }
-                        if dxz < best - 0.05 {
-                            best = dxz;
-                            ticks_without_progress = 0;
-                        } else {
-                            ticks_without_progress += 1;
-                            // ~1.5 s of no progress toward this node — give up on it.
-                            if ticks_without_progress > 30 {
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
+            if dx * dx + dz * dz <= 0.49 && dy.abs() < 1.5 {
+                idx += 1;
+                dig_progress = 0;
+                last_progress = Instant::now();
+                continue;
+            }
+
+            // Dig any blocks the move requires breaking, one at a time.
+            if dig_progress < next.to_break.len() {
+                let (bx, by, bz) = next.to_break[dig_progress];
+                if self.block_state_at(bx, by, bz) != 0 {
+                    self.clear_control_states();
+                    self.dig(bx, by, bz).await?;
                 }
+                dig_progress += 1;
+                last_progress = Instant::now();
+                continue;
+            }
+
+            // Block placement (scaffolding) isn't supported yet — re-path around it.
+            if !next.to_place.is_empty() {
+                self.clear_control_states();
+                return Ok(FollowOutcome::NeedRepath);
+            }
+
+            // Walk toward the waypoint; jump to step up or for parkour.
+            let mx = next.x as f64 + 0.5 - p.x;
+            let mz = next.z as f64 + 0.5 - p.z;
+            self.look((-mx).atan2(-mz), 0.0);
+            self.set_control_state("forward", true);
+            self.set_control_state("sprint", true);
+            self.set_control_state("jump", next.parkour || next.y as f64 > p.y + 0.5);
+
+            if last_progress.elapsed() > Duration::from_millis(3500) {
+                self.clear_control_states();
+                return Ok(FollowOutcome::NeedRepath);
+            }
+            if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
+                return Ok(FollowOutcome::Disconnected);
             }
         }
         self.clear_control_states();
-        self.wait_ticks(2).await?;
-        let arrived = self.entity.position.distance(vec3(x as f64, y as f64, z as f64)) < 2.5;
-        Ok(arrived)
+        Ok(FollowOutcome::Reached)
     }
 
     pub async fn respawn(&mut self) -> std::io::Result<()> {
