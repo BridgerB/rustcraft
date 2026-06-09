@@ -910,6 +910,29 @@ impl<'a> Bot<'a> {
             .await
     }
 
+    /// Dig toward (x,y,z): raycast from the eye and dig whatever solid block is
+    /// in the way (e.g. a leaf occluding a trunk), or the target itself if the
+    /// ray reaches it. Returns `true` if it dug the actual target. `false` if the
+    /// target is out of reach. Call repeatedly to clear a path to a block.
+    pub async fn dig_toward(&mut self, x: i32, y: i32, z: i32) -> std::io::Result<bool> {
+        let eye = vec3(self.entity.position.x, self.entity.position.y + PLAYER_EYE_HEIGHT, self.entity.position.z);
+        let center = vec3(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
+        let d = center.subtract(eye);
+        let dist = d.length();
+        if dist > 5.5 {
+            return Ok(false);
+        }
+        self.look_at(center);
+        self.wait_ticks(2).await?;
+        let dir = d.scale(1.0 / dist.max(1e-6));
+        let (bx, by, bz) = match raycast(&self.world, eye, dir, dist + 0.6, None) {
+            Some(hit) => (hit.position.x.floor() as i32, hit.position.y.floor() as i32, hit.position.z.floor() as i32),
+            None => (x, y, z),
+        };
+        self.dig(bx, by, bz).await?;
+        Ok((bx, by, bz) == (x, y, z))
+    }
+
     /// The block face nearest the bot: 0 bottom, 1 top, 2 north(-z), 3 south(+z),
     /// 4 west(-x), 5 east(+x).
     fn dig_face(&self, x: i32, y: i32, z: i32) -> i32 {
