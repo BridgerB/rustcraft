@@ -192,7 +192,7 @@ impl<'a> Bot<'a> {
             held_slot: 0,
             control_state: ControlState::default(),
             physics_enabled: true,
-            movement: MovementsConfig { max_drop_down: 1, ..MovementsConfig::default() },
+            movement: MovementsConfig { max_drop_down: 3, ..MovementsConfig::default() },
             physics: None,
             should_physics: false,
             last_tick: Instant::now(),
