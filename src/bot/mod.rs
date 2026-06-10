@@ -144,6 +144,9 @@ pub struct Bot<'a> {
     physics: Option<PhysicsEngine>,
     should_physics: bool,
     last_tick: Instant,
+    /// When the server last teleported/corrected our position. Digs wait for this
+    /// to be stale (position agreed) before mining, else they're out-of-reach.
+    last_teleport: Instant,
     last_sent: Option<(Vec3, f64, f64)>,
     sequence: i32,
     spawned: bool,
@@ -196,6 +199,7 @@ impl<'a> Bot<'a> {
             physics: None,
             should_physics: false,
             last_tick: Instant::now(),
+            last_teleport: Instant::now(),
             last_sent: None,
             sequence: 0,
             spawned: false,
@@ -571,6 +575,7 @@ impl<'a> Bot<'a> {
 
         if let Some(id) = params.get("teleportId").cloned() {
             self.client.write("accept_teleportation", PValue::compound(vec![("teleportId", id)])).await?;
+            self.last_teleport = Instant::now();
         }
         self.should_physics = true;
         self.last_sent = None;
@@ -885,13 +890,14 @@ impl<'a> Bot<'a> {
         // client's position is then rejected as out-of-reach. Settling on the
         // ground with no controls lets the positions reconcile.
         self.clear_control_states();
-        for i in 0..24 {
+        // Stand still until the server stops correcting us (no teleport for
+        // ~400 ms) AND we're grounded — only then do client & server agree on
+        // where we are, so the dig isn't rejected as out-of-reach.
+        for _ in 0..40 {
             if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
                 return Ok(());
             }
-            // Settle on the ground; once grounded, give 3 more ticks for the
-            // server to agree on the position, then proceed.
-            if self.entity.on_ground && i >= 3 {
+            if self.entity.on_ground && self.last_teleport.elapsed() > Duration::from_millis(400) {
                 break;
             }
         }
@@ -937,8 +943,8 @@ impl<'a> Bot<'a> {
             let p = self.entity.position;
             let dist = ((x as f64 + 0.5 - p.x).powi(2) + (y as f64 + 0.5 - p.y - 1.62).powi(2) + (z as f64 + 0.5 - p.z).powi(2)).sqrt();
             eprintln!(
-                "DIG ({x},{y},{z}) face={face} bot=({:.1},{:.1},{:.1}) eyeDist={dist:.1} see={} ground={} broke={}",
-                p.x, p.y, p.z, self.can_see_block(x, y, z), self.entity.on_ground, self.block_state_at(x, y, z) == 0
+                "DIG ({x},{y},{z}) bot=({:.1},{:.1},{:.1}) eyeDist={dist:.1} see={} ground={} sinceTp={}ms broke={}",
+                p.x, p.y, p.z, self.can_see_block(x, y, z), self.entity.on_ground, self.last_teleport.elapsed().as_millis(), self.block_state_at(x, y, z) == 0
             );
         }
 
