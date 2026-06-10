@@ -192,7 +192,7 @@ impl<'a> Bot<'a> {
             held_slot: 0,
             control_state: ControlState::default(),
             physics_enabled: true,
-            movement: MovementsConfig { liquid_cost: 100.0, ..MovementsConfig::default() }, // steve config: default drops + digging
+            movement: MovementsConfig { liquid_cost: 100.0, max_drop_down: 2, ..MovementsConfig::default() }, // low drop avoids inescapable pits; climbing UP is unaffected
             physics: None,
             should_physics: false,
             last_tick: Instant::now(),
