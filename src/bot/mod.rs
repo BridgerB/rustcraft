@@ -921,20 +921,16 @@ impl<'a> Bot<'a> {
             .await?;
         self.swing_arm().await?;
 
-        // Keep digging until the block actually breaks. The break-time estimate
-        // can be off (the datagen lacks exact hardness), so dig until the server
-        // turns the block to air, capped generously.
-        let cap = if time.is_zero() {
-            Duration::ZERO
-        } else {
-            (time * 2 + Duration::from_secs(2)).min(Duration::from_secs(5))
-        };
-        let deadline = Instant::now() + cap;
+        // Mine for the computed break time (like the vanilla client), swinging
+        // periodically and holding the look on the block, then send STOP. A small
+        // margin covers rounding. Break early if the server turns it to air.
+        let mine_for = if time.is_zero() { Duration::ZERO } else { time + Duration::from_millis(150) };
+        let deadline = Instant::now() + mine_for;
         let start_state = self.block_state_at(x, y, z);
         while Instant::now() < deadline {
-            self.look_at(center); // keep facing the block while mining
+            self.look_at(center); // hold the look on the block while mining
             self.swing_arm().await?;
-            self.wait_ticks(5).await?;
+            self.wait_ticks(2).await?;
             if self.block_state_at(x, y, z) == 0 {
                 break;
             }
@@ -955,8 +951,10 @@ impl<'a> Bot<'a> {
             )
             .await?;
 
-        // The server breaks the block in response to FINISH (status 2), so wait a
-        // few ticks for the resulting block_update before judging the result.
+        // The server breaks the block in response to FINISH (status 2). With the
+        // 1.19+ prediction model it does NOT echo a block_update back to the
+        // breaker, so wait a few ticks (in case it does), then count nearby item
+        // drops — a drop proves the break landed even with no block_update.
         let pre = self.block_state_at(x, y, z);
         for _ in 0..6 {
             if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
@@ -966,11 +964,30 @@ impl<'a> Bot<'a> {
                 break;
             }
         }
+        // 1.19+ block prediction: the server breaks the block in response to
+        // FINISH but does NOT echo a block_update back to the breaking player, so
+        // our world would stay stale and we'd re-dig the same block forever.
+        // Reflect the break locally for blocks that break by hand in this time.
+        if self.block_state_at(x, y, z) != 0 && time < Duration::from_secs(4) {
+            self.world.set_block_state_id(vec3(x as f64, y as f64, z as f64), 0);
+        }
+        let item_type = self.registry.entities_by_name.get("item").map(|d| d.id);
+        let drops = self
+            .entities
+            .values()
+            .filter(|e| item_type.is_none() || e.entity_type == item_type)
+            .filter(|e| {
+                let dx = e.position.x - (x as f64 + 0.5);
+                let dy = e.position.y - (y as f64 + 0.5);
+                let dz = e.position.z - (z as f64 + 0.5);
+                dx * dx + dy * dy + dz * dz < 9.0
+            })
+            .count();
         if std::env::var("DIG_DEBUG").is_ok() {
             let p = self.entity.position;
             let dist = ((x as f64 + 0.5 - p.x).powi(2) + (y as f64 + 0.5 - p.y - 1.62).powi(2) + (z as f64 + 0.5 - p.z).powi(2)).sqrt();
             eprintln!(
-                "DIG ({x},{y},{z}) bot=({:.1},{:.1},{:.1}) eyeDist={dist:.1} see={} ground={} sinceTp={}ms preFinish={pre} broke={}",
+                "DIG ({x},{y},{z}) bot=({:.1},{:.1},{:.1}) eyeDist={dist:.1} see={} ground={} sinceTp={}ms preFinish={pre} broke={} dropsNear={drops}",
                 p.x, p.y, p.z, self.can_see_block(x, y, z), self.entity.on_ground, self.last_teleport.elapsed().as_millis(), self.block_state_at(x, y, z) == 0
             );
         }
@@ -1037,8 +1054,15 @@ impl<'a> Bot<'a> {
         if hardness <= 0.0 {
             return Duration::ZERO;
         }
-        let speed = tool_speed(self.held_item().map(|i| i.name.as_str()), self.block_at(x, y, z).map(|b| b.name));
-        let can_harvest = speed > 1.0;
+        let name = self.block_at(x, y, z).map(|b| b.name.clone()).unwrap_or_default();
+        let speed = tool_speed(self.held_item().map(|i| i.name.as_str()), Some(name.clone()));
+        // A block is "harvestable" (normal speed, /30) when it needs no specific
+        // tool OR we hold the right one. Only tool-required blocks (stone/ores/
+        // metal) are 5× slower by hand (/100). Wood/dirt/leaves/sand need no tool.
+        let needs_tool = name.contains("stone") || name.contains("ore") || name.contains("deepslate")
+            || name.contains("obsidian") || name.ends_with("_block") && (name.contains("iron") || name.contains("gold") || name.contains("diamond") || name.contains("copper") || name.contains("netherite"))
+            || name.contains("anvil") || name.contains("furnace") || name.contains("brick");
+        let can_harvest = !needs_tool || speed > 1.0;
         let damage = speed / hardness / if can_harvest { 30.0 } else { 100.0 };
         if damage >= 1.0 {
             return Duration::ZERO;
