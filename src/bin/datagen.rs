@@ -267,7 +267,10 @@ fn main() {
             })
             .collect();
 
-        let solid = !NON_SOLID_TYPES.contains(&def_type);
+        // A non-solid TYPE (e.g. the grass plant) marks a block passable — BUT
+        // full "_block" blocks (notably grass_block, whose definition type is also
+        // "grass") are solid cubes. Without this, the bot falls through grass.
+        let solid = !NON_SOLID_TYPES.contains(&def_type) || name.ends_with("_block");
         let bounding_box = if solid { "block" } else { "empty" };
         collision_blocks.insert(name.to_string(), json!(if solid { 1 } else { 0 }));
 
