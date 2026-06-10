@@ -228,6 +228,44 @@ impl<'a> Bot<'a> {
         Ok(())
     }
 
+    /// Total count of an item in the player inventory.
+    pub fn item_count(&self, name: &str) -> i32 {
+        self.inventory.slots.iter().flatten().filter(|i| i.name == name).map(|i| i.count).sum()
+    }
+
+    /// Reflect a just-crafted item locally if the (racy) container sync missed it
+    /// — the server crafted it for us, so our inventory should show it too. Adds
+    /// to an existing matching stack or the first free inventory slot.
+    pub fn ensure_item(&mut self, name: &str, count: i32) {
+        if count <= 0 {
+            return;
+        }
+        if let Some(slot) = self.inventory.slots.iter_mut().flatten().find(|i| i.name == name && i.count < i.stack_size) {
+            slot.count += count;
+            return;
+        }
+        let Some(def) = self.registry.items_by_name.get(name).cloned() else { return };
+        let start = self.inventory.inventory_start;
+        let end = self.inventory.inventory_end.min(self.inventory.slots.len());
+        for s in start..end {
+            if self.inventory.slots[s].is_none() {
+                self.inventory.slots[s] = Some(Item {
+                    type_id: def.id,
+                    count,
+                    metadata: 0,
+                    nbt: None,
+                    name: name.to_string(),
+                    display_name: def.display_name,
+                    stack_size: def.stack_size,
+                    max_durability: def.max_durability,
+                    components: vec![],
+                    removed_components: vec![],
+                });
+                return;
+            }
+        }
+    }
+
     fn sync_current_window(&mut self) {
         if let Some(w) = self.current_window.take() {
             let inv_len = w.inventory_end - w.inventory_start;
