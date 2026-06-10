@@ -185,7 +185,7 @@ impl<'a> Bot<'a> {
 
     // ── small accessors used by craft (avoid borrow tangles) ──
 
-    fn window_selected(&self) -> Option<i32> {
+    pub fn window_selected(&self) -> Option<i32> {
         let w = self.current_window.as_ref().unwrap_or(&self.inventory);
         w.selected_item.as_ref().map(|i| i.type_id)
     }

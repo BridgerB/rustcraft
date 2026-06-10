@@ -908,6 +908,25 @@ impl<'a> Bot<'a> {
         self.client.write("swing", PValue::compound(vec![("hand", PValue::num(0.0))])).await
     }
 
+    /// Melee-attack an entity (left-click). Faces it, swings, sends interact.
+    pub async fn attack(&mut self, entity_id: i32) -> std::io::Result<()> {
+        if let Some(e) = self.entities.get(&entity_id) {
+            let c = e.position;
+            self.look_at(vec3(c.x, c.y + 0.7, c.z));
+        }
+        self.swing_arm().await?;
+        self.client
+            .write(
+                "interact",
+                PValue::compound(vec![
+                    ("target", PValue::num(entity_id as f64)),
+                    ("mouse", PValue::num(1.0)), // 1 = attack
+                    ("sneaking", PValue::Bool(false)),
+                ]),
+            )
+            .await
+    }
+
     /// Dig the block at (x,y,z): face it, send start, wait the break time while
     /// swinging, then send finish.
     pub async fn dig(&mut self, x: i32, y: i32, z: i32) -> std::io::Result<()> {
