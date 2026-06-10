@@ -169,6 +169,21 @@ impl<'a> Bot<'a> {
         client.login(&options).await?;
         let mut entity = Entity::new(0);
         entity.health = 20.0;
+        // Pickaxe-required blocks the bot can't break by hand. The pathfinder
+        // must NOT route through these (it would tunnel "through" stone the bot
+        // can never mine, and the follower would wedge digging it forever). The
+        // mining task clears this once a pickaxe is in hand.
+        let mut cant_break: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for (name, def) in &registry.blocks_by_name {
+            if name.contains("stone") || name.contains("ore") || name.contains("deepslate")
+                || name.contains("obsidian") || name.contains("basalt") || name.contains("blackstone")
+                || name.contains("granite") || name.contains("diorite") || name.contains("andesite")
+                || name.contains("tuff") || name.contains("calcite") || name.contains("terracotta")
+                || name.contains("brick") || name.contains("ancient_debris")
+            {
+                cant_break.insert(def.id);
+            }
+        }
         Ok(Bot {
             inventory: crate::window::create_window_from_type(registry, 0, -1, Some("minecraft:inventory"), "Inventory", None)
                 .unwrap_or_else(|| Window::new(0, "minecraft:inventory", "", 46, 9, 44, 0, true)),
@@ -195,7 +210,7 @@ impl<'a> Bot<'a> {
             held_slot: 0,
             control_state: ControlState::default(),
             physics_enabled: true,
-            movement: MovementsConfig { liquid_cost: 100.0, max_drop_down: 1, ..MovementsConfig::default() }, // low drop avoids inescapable pits; climbing UP is unaffected
+            movement: MovementsConfig { liquid_cost: 100.0, max_drop_down: 1, blocks_cant_break: cant_break, ..MovementsConfig::default() }, // low drop + don't path through unbreakable stone
             physics: None,
             should_physics: false,
             last_tick: Instant::now(),
