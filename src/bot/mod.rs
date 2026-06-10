@@ -732,8 +732,22 @@ impl<'a> Bot<'a> {
         let window_id = params.get("windowId").and_then(PValue::as_i32).unwrap_or(0);
         let type_id = params.get("inventoryType").and_then(PValue::as_i64).unwrap_or(0);
         let title = params.get("windowTitle").and_then(PValue::as_str).unwrap_or("").to_string();
-        self.current_window =
+        let mut win =
             crate::window::create_window_from_type(self.registry, window_id, type_id, None, &title, None);
+        // Seed the new window's inventory portion with our current inventory — the
+        // client already knows its items; without this the container opens "empty",
+        // crafts can't find ingredients, and closing wipes the real inventory.
+        if let Some(w) = win.as_mut() {
+            let inv_len = w.inventory_end - w.inventory_start;
+            for i in 0..inv_len {
+                let ws = w.inventory_start + i;
+                let ps = self.inventory.inventory_start + i;
+                if ws < w.slots.len() && ps < self.inventory.slots.len() {
+                    w.slots[ws] = self.inventory.slots[ps].clone();
+                }
+            }
+        }
+        self.current_window = win;
     }
 
     /// Copy a closing container's inventory section back into the player inventory.
