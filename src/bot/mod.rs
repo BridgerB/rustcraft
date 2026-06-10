@@ -1105,7 +1105,11 @@ impl<'a> Bot<'a> {
         };
         let (px, py, pz) = (x + ox, y + oy, z + oz);
         if self.block_state_at(px, py, pz) == 0 {
-            if let Some(state) = held.and_then(|n| self.registry.blocks_by_name.get(&n).map(|b| b.default_state)) {
+            let state = held.and_then(|n| {
+                let key = n.strip_prefix("minecraft:").unwrap_or(&n).to_string();
+                self.registry.blocks_by_name.get(&key).map(|b| b.default_state)
+            });
+            if let Some(state) = state {
                 self.world.set_block_state_id(vec3(px as f64, py as f64, pz as f64), state);
             }
         }
