@@ -91,6 +91,11 @@ impl<'a> Bot<'a> {
             }
 
             let mut original_source: Option<i32> = None;
+            // Slot of the stack currently on the cursor. Before grabbing a DIFFERENT
+            // ingredient we must put this one back — otherwise its leftovers get
+            // dumped into the new ingredient's slot, corrupting the grid (the table
+            // then sees a stray single plank = a button recipe, not a pickaxe).
+            let mut held_source: Option<i32> = None;
 
             // Place shaped ingredients.
             if let Some(shape) = &recipe.in_shape {
@@ -106,6 +111,9 @@ impl<'a> Bot<'a> {
                             .map(|t| ingredient_matches(t, ingredient))
                             .unwrap_or(false);
                         if !held_matches {
+                            if let Some(hs) = held_source.take() {
+                                self.click_window(hs, 0, 0).await?;
+                            }
                             let src = self
                                 .active_window_ref()
                                 .and_then(|win| find_ingredient_slot(win, ingredient))
@@ -113,6 +121,7 @@ impl<'a> Bot<'a> {
                             let src = src as i32;
                             original_source.get_or_insert(src);
                             self.click_window(src, 0, 0).await?;
+                            held_source = Some(src);
                         }
                         self.click_window(slot(x, y), 1, 0).await?; // right-click: drop one
                     }
@@ -130,6 +139,9 @@ impl<'a> Bot<'a> {
                         .map(|t| ingredient_matches(t, ingredient))
                         .unwrap_or(false);
                     if !held_matches {
+                        if let Some(hs) = held_source.take() {
+                            self.click_window(hs, 0, 0).await?;
+                        }
                         let src = self
                             .active_window_ref()
                             .and_then(|win| find_ingredient_slot(win, ingredient))
@@ -137,9 +149,14 @@ impl<'a> Bot<'a> {
                         let src = src as i32;
                         original_source.get_or_insert(src);
                         self.click_window(src, 0, 0).await?;
+                        held_source = Some(src);
                     }
                     self.click_window(dest, 1, 0).await?;
                 }
+            }
+            // Return the last-held stack to its own source before taking the result.
+            if let Some(hs) = held_source.take() {
+                self.click_window(hs, 0, 0).await?;
             }
 
             // Return any leftover held item, then take the result + clear the grid.
