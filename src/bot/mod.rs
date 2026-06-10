@@ -1075,6 +1075,7 @@ impl<'a> Bot<'a> {
     pub async fn place_block(&mut self, x: i32, y: i32, z: i32, face: Face) -> std::io::Result<()> {
         self.sequence += 1;
         let seq = self.sequence;
+        let held = self.held_item().map(|i| i.name.clone());
         self.client
             .write(
                 "use_item_on",
@@ -1090,7 +1091,25 @@ impl<'a> Bot<'a> {
                     ("sequence", PValue::num(seq as f64)),
                 ]),
             )
-            .await
+            .await?;
+        // Predict the placement: the server places the block but (1.19+) sends no
+        // block_update back to the placer, so reflect it locally — the new block
+        // appears one step out from the clicked face.
+        let (ox, oy, oz) = match face {
+            Face::Bottom => (0, -1, 0),
+            Face::Top => (0, 1, 0),
+            Face::North => (0, 0, -1),
+            Face::South => (0, 0, 1),
+            Face::West => (-1, 0, 0),
+            Face::East => (1, 0, 0),
+        };
+        let (px, py, pz) = (x + ox, y + oy, z + oz);
+        if self.block_state_at(px, py, pz) == 0 {
+            if let Some(state) = held.and_then(|n| self.registry.blocks_by_name.get(&n).map(|b| b.default_state)) {
+                self.world.set_block_state_id(vec3(px as f64, py as f64, pz as f64), state);
+            }
+        }
+        Ok(())
     }
 
     /// Walk to within ~2 blocks of (x,y,z). Returns `true` if the goal is met.
