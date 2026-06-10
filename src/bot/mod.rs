@@ -1244,7 +1244,18 @@ impl<'a> Bot<'a> {
         let mut dig_progress = 0usize;
         let mut last_xz = (self.entity.position.x, self.entity.position.z);
         let mut stuck_ticks = 0u32;
+        let debug = std::env::var("FOLLOW_DEBUG").is_ok();
+        let mut dbgi = 0u32;
         while idx < path.len() {
+            if debug && dbgi % 8 == 0 {
+                let pp = self.entity.position;
+                let n = &path[idx];
+                eprintln!(
+                    "FOLLOW idx={idx}/{} bot=({:.1},{:.1},{:.1}) wp=({},{},{}) dy={:.1} stuck={stuck_ticks} ground={} break={}",
+                    path.len(), pp.x, pp.y, pp.z, n.x, n.y, n.z, n.y as f64 - pp.y, self.entity.on_ground, n.to_break.len()
+                );
+            }
+            dbgi += 1;
             // Hard cap so one path segment can't exceed the overall goto budget.
             if follow_start.elapsed() > Duration::from_secs(12) {
                 self.clear_control_states();
@@ -1292,26 +1303,35 @@ impl<'a> Bot<'a> {
             self.look((-mx).atan2(-mz), 0.0);
             self.set_control_state("forward", true);
             self.set_control_state("sprint", true);
-            self.set_control_state("jump", next.parkour || next.y as f64 > p.y + 0.5 || stuck_ticks >= 5);
+            // Jump to climb only when CLOSE to the up-step (so we walk up to it with
+            // ground momentum and step onto it), or for parkour. Jumping while far
+            // from the step just bounces in open air with no forward progress.
+            let near = dx * dx + dz * dz < 1.6;
+            self.set_control_state("jump", next.parkour || (next.y as f64 > p.y + 0.5 && near));
 
-            if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
+            let step = self.drive_tick().await?;
+            if matches!(step, DriveStep::Disconnected) {
                 return Ok(FollowOutcome::Disconnected);
             }
 
-            // Track horizontal movement only to drive anti-wedge jumping; the
-            // re-path timer (`last_progress`) advances solely when a WAYPOINT is
-            // reached, so oscillating near an unreachable node still times out.
-            let np = self.entity.position;
-            let moved = (np.x - last_xz.0).powi(2) + (np.z - last_xz.1).powi(2);
-            if moved > 0.0025 {
-                last_xz = (np.x, np.z);
-                stuck_ticks = 0;
-            } else {
-                stuck_ticks += 1;
+            // Only judge "stuck" on actual PHYSICS ticks — the loop also spins on
+            // packet I/O (no movement), and counting those as stuck makes the bot
+            // re-path constantly and crawl. One physics tick = one chance to move.
+            if matches!(step, DriveStep::Tick) {
+                let np = self.entity.position;
+                let moved = (np.x - last_xz.0).powi(2) + (np.z - last_xz.1).powi(2);
+                if moved > 0.0009 {
+                    last_xz = (np.x, np.z);
+                    stuck_ticks = 0;
+                } else {
+                    stuck_ticks += 1;
+                }
             }
 
-            // Give up this path after ~2.5 s without reaching the next waypoint.
-            if last_progress.elapsed() > Duration::from_millis(2500) {
+            // Re-path when genuinely stuck: ~40 ticks with no horizontal movement
+            // (tick-based — reliable even when the loop spins on packet I/O), or
+            // 2.5 s wall-clock without reaching the next waypoint.
+            if stuck_ticks >= 40 || last_progress.elapsed() > Duration::from_millis(2500) {
                 self.clear_control_states();
                 return Ok(FollowOutcome::NeedRepath);
             }
