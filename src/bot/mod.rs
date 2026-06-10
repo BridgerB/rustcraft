@@ -354,6 +354,11 @@ impl<'a> Bot<'a> {
     // ── Packet handling ──
 
     async fn handle_packet(&mut self, name: &str, params: &PValue) -> std::io::Result<Option<BotEvent>> {
+        if std::env::var("PKT_DEBUG").is_ok()
+            && (name.contains("block") || name.contains("ack") || name.contains("position") || name.contains("disconnect") || name == "system_chat")
+        {
+            eprintln!("PKT {name} {:?}", params);
+        }
         match name {
             "login" => {
                 self.handle_login(params).await?;
@@ -494,6 +499,23 @@ impl<'a> Bot<'a> {
         self.entity.id = params.get("entityId").and_then(PValue::as_i32).unwrap_or(0);
         self.game.max_players = params.get("maxPlayers").and_then(PValue::as_i32).unwrap_or(0);
         self.game.hardcore = params.get("isHardcore").and_then(PValue::as_bool).unwrap_or(false);
+        // Game mode lives in the per-world spawn info (1.20.5+); fall back to a
+        // top-level field on older protocols. 0=survival 1=creative 2=adventure 3=spectator.
+        let gm = params
+            .get("worldState")
+            .and_then(|w| w.get("gamemode"))
+            .or_else(|| params.get("gamemode"))
+            .or_else(|| params.get("gameMode"))
+            .and_then(PValue::as_i32);
+        if std::env::var("GM_DEBUG").is_ok() {
+            eprintln!("LOGIN gamemode={gm:?} worldState={:?}", params.get("worldState"));
+        }
+        self.game.game_mode = match gm {
+            Some(1) => "creative".into(),
+            Some(2) => "adventure".into(),
+            Some(3) => "spectator".into(),
+            _ => "survival".into(),
+        };
 
         let mut brand_data = Vec::new();
         crate::varint::push_var_int(&mut brand_data, self.brand.len() as i32);
@@ -857,6 +879,20 @@ impl<'a> Bot<'a> {
     pub async fn dig(&mut self, x: i32, y: i32, z: i32) -> std::io::Result<()> {
         let center = vec3(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
         let face = self.dig_face(x, y, z);
+        // Stop moving and let the server agree on where we are before digging.
+        // While walking/climbing the client position can run ahead of the
+        // server's (which periodically teleports us back); a dig sent from the
+        // client's position is then rejected as out-of-reach. Settling on the
+        // ground with no controls lets the positions reconcile.
+        self.clear_control_states();
+        for _ in 0..12 {
+            if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
+                return Ok(());
+            }
+            if self.entity.on_ground && self.entity.velocity.length() < 0.05 {
+                break;
+            }
+        }
         // Face the block and push that look to the server before starting — the
         // server validates the player is looking at the block.
         self.look_at(center);
@@ -886,6 +922,7 @@ impl<'a> Bot<'a> {
             (time * 2 + Duration::from_secs(2)).min(Duration::from_secs(5))
         };
         let deadline = Instant::now() + cap;
+        let start_state = self.block_state_at(x, y, z);
         while Instant::now() < deadline {
             self.look_at(center); // keep facing the block while mining
             self.swing_arm().await?;
@@ -893,6 +930,14 @@ impl<'a> Bot<'a> {
             if self.block_state_at(x, y, z) == 0 {
                 break;
             }
+        }
+        if std::env::var("DIG_DEBUG").is_ok() {
+            let p = self.entity.position;
+            let dist = ((x as f64 + 0.5 - p.x).powi(2) + (y as f64 + 0.5 - p.y - 1.62).powi(2) + (z as f64 + 0.5 - p.z).powi(2)).sqrt();
+            eprintln!(
+                "DIG ({x},{y},{z}) face={face} bot=({:.1},{:.1},{:.1}) eyeDist={dist:.1} see={} ground={} broke={}",
+                p.x, p.y, p.z, self.can_see_block(x, y, z), self.entity.on_ground, self.block_state_at(x, y, z) == 0
+            );
         }
 
         self.sequence += 1;
@@ -924,23 +969,31 @@ impl<'a> Bot<'a> {
         }
         self.look_at(center);
         self.wait_ticks(2).await?;
-        let dir = d.scale(1.0 / dist.max(1e-6));
-        // Raycast to whatever's actually in the way; if it's adjacent to the
-        // target (an occluding leaf right next to it) or the target itself, dig
-        // it — this clears leaves blocking a trunk and tunnels through.
-        let (bx, by, bz) = match raycast(&self.world, eye, dir, dist + 0.6, None) {
-            Some(hit) => (hit.position.x.floor() as i32, hit.position.y.floor() as i32, hit.position.z.floor() as i32),
-            None => (x, y, z),
-        };
-        // If the ray stopped short of the target but the target is point-blank
-        // and we can see it directly, just dig the target.
-        let hit_is_target = (bx, by, bz) == (x, y, z);
-        if !hit_is_target && dist <= 2.0 && self.can_see_block(x, y, z) {
+        // Clear line of sight? Dig the target directly. The server validates LOS,
+        // so digging an occluded block is silently rejected — we must clear the
+        // occluder first.
+        if self.can_see_block(x, y, z) {
             self.dig(x, y, z).await?;
             return Ok(true);
         }
-        self.dig(bx, by, bz).await?;
-        Ok(hit_is_target)
+        // Occluded: step along the eye→target ray and dig the FIRST non-air block
+        // that isn't the target (a leaf or trunk segment in the way). Block
+        // presence — not collision shape — matches the server's LOS check, so
+        // this reliably tunnels a sight-line to the trunk. Call repeatedly.
+        let dir = d.scale(1.0 / dist.max(1e-6));
+        let mut t = 0.4;
+        while t < dist + 0.5 {
+            let pt = eye.add(dir.scale(t));
+            let (bx, by, bz) = (pt.x.floor() as i32, pt.y.floor() as i32, pt.z.floor() as i32);
+            if (bx, by, bz) != (x, y, z) && self.block_state_at(bx, by, bz) != 0 {
+                self.dig(bx, by, bz).await?;
+                return Ok(false); // cleared an occluder; trunk still pending
+            }
+            t += 0.25;
+        }
+        // No occluder found along the ray — dig the target.
+        self.dig(x, y, z).await?;
+        Ok(true)
     }
 
     /// The block face nearest the bot: 0 bottom, 1 top, 2 north(-z), 3 south(+z),
