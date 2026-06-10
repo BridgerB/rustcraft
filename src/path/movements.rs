@@ -152,6 +152,17 @@ impl<'a> Movements<'a> {
     /// 0 if safe, dig_cost if breakable (records break), -1 if impassable.
     fn safe_or_break(&self, x: i32, y: i32, z: i32, to_break: &mut Vec<(i32, i32, i32)>) -> f64 {
         let block = self.query(x, y, z);
+        // Lava is a liquid but is NEVER passable — treat it as a wall the path must
+        // route around (water is fine to wade through). Also avoid stepping right
+        // next to lava: a block with lava on any side is a death trap (drift/knock).
+        if block.lava {
+            return -1.0;
+        }
+        for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, -1, 0)] {
+            if self.query(x + dx, y + dy, z + dz).lava {
+                return -1.0;
+            }
+        }
         if block.safe || block.liquid {
             return 0.0;
         }
