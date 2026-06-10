@@ -885,11 +885,13 @@ impl<'a> Bot<'a> {
         // client's position is then rejected as out-of-reach. Settling on the
         // ground with no controls lets the positions reconcile.
         self.clear_control_states();
-        for _ in 0..12 {
+        for i in 0..24 {
             if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
                 return Ok(());
             }
-            if self.entity.on_ground && self.entity.velocity.length() < 0.05 {
+            // Settle on the ground; once grounded, give 3 more ticks for the
+            // server to agree on the position, then proceed.
+            if self.entity.on_ground && i >= 3 {
                 break;
             }
         }
