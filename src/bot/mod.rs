@@ -890,14 +890,14 @@ impl<'a> Bot<'a> {
         // client's position is then rejected as out-of-reach. Settling on the
         // ground with no controls lets the positions reconcile.
         self.clear_control_states();
-        // Stand still until the server stops correcting us (no teleport for
-        // ~400 ms) AND we're grounded — only then do client & server agree on
-        // where we are, so the dig isn't rejected as out-of-reach.
-        for _ in 0..40 {
+        // Briefly stop and settle on the ground so client & server agree on our
+        // position before mining — a dig sent mid-move is rejected as
+        // out-of-reach (the server periodically teleports us back).
+        for _ in 0..12 {
             if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
                 return Ok(());
             }
-            if self.entity.on_ground && self.last_teleport.elapsed() > Duration::from_millis(400) {
+            if self.entity.on_ground && self.entity.velocity.length() < 0.05 {
                 break;
             }
         }
