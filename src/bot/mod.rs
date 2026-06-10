@@ -939,14 +939,7 @@ impl<'a> Bot<'a> {
                 break;
             }
         }
-        if std::env::var("DIG_DEBUG").is_ok() {
-            let p = self.entity.position;
-            let dist = ((x as f64 + 0.5 - p.x).powi(2) + (y as f64 + 0.5 - p.y - 1.62).powi(2) + (z as f64 + 0.5 - p.z).powi(2)).sqrt();
-            eprintln!(
-                "DIG ({x},{y},{z}) bot=({:.1},{:.1},{:.1}) eyeDist={dist:.1} see={} ground={} sinceTp={}ms broke={}",
-                p.x, p.y, p.z, self.can_see_block(x, y, z), self.entity.on_ground, self.last_teleport.elapsed().as_millis(), self.block_state_at(x, y, z) == 0
-            );
-        }
+        let _ = start_state;
 
         self.sequence += 1;
         let fseq = self.sequence;
@@ -960,7 +953,28 @@ impl<'a> Bot<'a> {
                     ("sequence", PValue::num(fseq as f64)),
                 ]),
             )
-            .await
+            .await?;
+
+        // The server breaks the block in response to FINISH (status 2), so wait a
+        // few ticks for the resulting block_update before judging the result.
+        let pre = self.block_state_at(x, y, z);
+        for _ in 0..6 {
+            if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
+                break;
+            }
+            if self.block_state_at(x, y, z) == 0 {
+                break;
+            }
+        }
+        if std::env::var("DIG_DEBUG").is_ok() {
+            let p = self.entity.position;
+            let dist = ((x as f64 + 0.5 - p.x).powi(2) + (y as f64 + 0.5 - p.y - 1.62).powi(2) + (z as f64 + 0.5 - p.z).powi(2)).sqrt();
+            eprintln!(
+                "DIG ({x},{y},{z}) bot=({:.1},{:.1},{:.1}) eyeDist={dist:.1} see={} ground={} sinceTp={}ms preFinish={pre} broke={}",
+                p.x, p.y, p.z, self.can_see_block(x, y, z), self.entity.on_ground, self.last_teleport.elapsed().as_millis(), self.block_state_at(x, y, z) == 0
+            );
+        }
+        Ok(())
     }
 
     /// Dig toward (x,y,z): raycast from the eye and dig whatever solid block is
@@ -977,31 +991,23 @@ impl<'a> Bot<'a> {
         }
         self.look_at(center);
         self.wait_ticks(2).await?;
-        // Clear line of sight? Dig the target directly. The server validates LOS,
-        // so digging an occluded block is silently rejected — we must clear the
-        // occluder first.
-        if self.can_see_block(x, y, z) {
-            self.dig(x, y, z).await?;
-            return Ok(true);
-        }
-        // Occluded: step along the eye→target ray and dig the FIRST non-air block
-        // that isn't the target (a leaf or trunk segment in the way). Block
-        // presence — not collision shape — matches the server's LOS check, so
-        // this reliably tunnels a sight-line to the trunk. Call repeatedly.
+        // The server validates line-of-sight, so an occluded block can't be dug —
+        // we must clear the occluder first. Use the SAME raycast that
+        // `can_see_block` uses and dig whatever it hits first: the target if the
+        // line is clear, otherwise the occluding block (a leaf/trunk in the way).
+        // Repeated calls tunnel a sight-line through to the trunk.
         let dir = d.scale(1.0 / dist.max(1e-6));
-        let mut t = 0.4;
-        while t < dist + 0.5 {
-            let pt = eye.add(dir.scale(t));
-            let (bx, by, bz) = (pt.x.floor() as i32, pt.y.floor() as i32, pt.z.floor() as i32);
-            if (bx, by, bz) != (x, y, z) && self.block_state_at(bx, by, bz) != 0 {
+        match raycast(&self.world, eye, dir, dist + 1.0, None) {
+            Some(hit) => {
+                let (bx, by, bz) = (hit.position.x.floor() as i32, hit.position.y.floor() as i32, hit.position.z.floor() as i32);
                 self.dig(bx, by, bz).await?;
-                return Ok(false); // cleared an occluder; trunk still pending
+                Ok((bx, by, bz) == (x, y, z))
             }
-            t += 0.25;
+            None => {
+                self.dig(x, y, z).await?;
+                Ok(true)
+            }
         }
-        // No occluder found along the ray — dig the target.
-        self.dig(x, y, z).await?;
-        Ok(true)
     }
 
     /// The block face nearest the bot: 0 bottom, 1 top, 2 north(-z), 3 south(+z),
