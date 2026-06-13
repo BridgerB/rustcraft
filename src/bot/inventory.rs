@@ -299,6 +299,14 @@ impl<'a> Bot<'a> {
     pub async fn activate_item(&mut self) -> std::io::Result<()> {
         self.sequence += 1;
         let seq = self.sequence;
+        if std::env::var("CAST_SNIFF").is_ok() {
+            let held = self.held_item().map(|i| i.name.clone());
+            eprintln!(
+                "    SNIFF >use_item yaw={:.0} pitch={:.0} held={held:?}",
+                self.entity.yaw.to_degrees(),
+                self.entity.pitch.to_degrees()
+            );
+        }
         self.client
             .write(
                 "use_item",

@@ -383,6 +383,20 @@ impl<'a> Bot<'a> {
                 self.handle_login(params).await?;
                 return Ok(Some(BotEvent::Login));
             }
+            // Dimension change (e.g. stepping through a nether portal). The server
+            // sends `respawn` with the new world's SpawnInfo; update our dimension so
+            // callers can detect the change. Without this `game.dimension` would stay
+            // "overworld" forever and entering the Nether would be invisible.
+            "respawn" => {
+                if let Some(dim) = params
+                    .get("worldState")
+                    .and_then(|w| w.get("name"))
+                    .and_then(PValue::as_str)
+                {
+                    self.game.dimension = dim.to_string();
+                }
+                return Ok(Some(BotEvent::Login));
+            }
             "keep_alive" => {
                 let id = params.get("keepAliveId").cloned().unwrap_or(PValue::Long(0));
                 self.client.write("keep_alive", PValue::compound(vec![("keepAliveId", id)])).await?;
@@ -427,10 +441,47 @@ impl<'a> Bot<'a> {
                 let cz = params.get("chunkZ").and_then(PValue::as_i32).unwrap_or(0);
                 let _ = self.world.unload_column(cx, cz);
             }
+            // A batch of block changes within one chunk section. Fluid-triggered
+            // changes (e.g. lava→obsidian when water reaches it) arrive HERE, not as
+            // individual block_update packets — without handling this the bot never
+            // sees them (the obsidian a cast just made stays "lava" locally forever).
+            "section_blocks_update" => {
+                let coords = params.get("chunkCoordinates");
+                let sx = coords.and_then(|c| c.get("x")).and_then(PValue::as_i64).unwrap_or(0);
+                let sy = coords.and_then(|c| c.get("y")).and_then(PValue::as_i64).unwrap_or(0);
+                let sz = coords.and_then(|c| c.get("z")).and_then(PValue::as_i64).unwrap_or(0);
+                let sniff = std::env::var("CAST_SNIFF").is_ok();
+                let mut last = None;
+                if let Some(records) = params.get("records").and_then(PValue::as_list) {
+                    for rec in records {
+                        let v = rec.as_i64().unwrap_or(0) as u64;
+                        let state = (v >> 12) as u32;
+                        let p = v & 0xFFF;
+                        let lx = ((p >> 8) & 0xF) as i64;
+                        let lz = ((p >> 4) & 0xF) as i64;
+                        let ly = (p & 0xF) as i64;
+                        let (wx, wy, wz) = (sx * 16 + lx, sy * 16 + ly, sz * 16 + lz);
+                        if sniff {
+                            let nm = self.registry.blocks_by_state_id.get(&state).map(|b| b.name.clone()).unwrap_or_else(|| "?".into());
+                            eprintln!("    SNIFF section_update ({wx},{wy},{wz}) -> {nm}");
+                        }
+                        self.world.set_block_state_id(vec3(wx as f64, wy as f64, wz as f64), state);
+                        last = Some((wx as i32, wy as i32, wz as i32));
+                    }
+                }
+                self.world.take_events();
+                if let Some((x, y, z)) = last {
+                    return Ok(Some(BotEvent::BlockUpdate(x, y, z)));
+                }
+            }
             "block_update" => {
                 if let Some(loc) = params.get("location") {
                     let (x, y, z) = loc_xyz(loc);
                     let state = params.get("type").and_then(PValue::as_i32).unwrap_or(0) as u32;
+                    if std::env::var("CAST_SNIFF").is_ok() {
+                        let nm = self.registry.blocks_by_state_id.get(&state).map(|b| b.name.clone()).unwrap_or_else(|| "?".into());
+                        eprintln!("    SNIFF block_update ({x},{y},{z}) -> {nm}");
+                    }
                     self.world.set_block_state_id(vec3(x as f64, y as f64, z as f64), state);
                     self.world.take_events();
                     return Ok(Some(BotEvent::BlockUpdate(x, y, z)));
@@ -535,6 +586,15 @@ impl<'a> Bot<'a> {
             Some(3) => "spectator".into(),
             _ => "survival".into(),
         };
+        // Initial dimension comes from the login packet's world SpawnInfo (the same
+        // `name` field a `respawn` carries on a dimension change).
+        if let Some(dim) = params
+            .get("worldState")
+            .and_then(|w| w.get("name"))
+            .and_then(PValue::as_str)
+        {
+            self.game.dimension = dim.to_string();
+        }
 
         let mut brand_data = Vec::new();
         crate::varint::push_var_int(&mut brand_data, self.brand.len() as i32);
@@ -1124,6 +1184,9 @@ impl<'a> Bot<'a> {
         self.sequence += 1;
         let seq = self.sequence;
         let held = self.held_item().map(|i| i.name.clone());
+        if std::env::var("CAST_SNIFF").is_ok() {
+            eprintln!("    SNIFF >use_item_on ({x},{y},{z}) face={face:?} held={held:?}");
+        }
         self.client
             .write(
                 "use_item_on",
