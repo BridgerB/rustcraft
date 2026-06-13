@@ -214,6 +214,22 @@ impl<'a> Bot<'a> {
                 return Ok(false);
             }
         }
+        if self.current_window.is_none() {
+            return Ok(false);
+        }
+        // The window opened, but `handle_open_screen` SEEDED its inventory section
+        // with our *client-side* (possibly phantom) inventory. The server's
+        // authoritative `container_set_content` arrives a beat later and overwrites
+        // it with the truth. Wait for that content packet (an inv_revision bump)
+        // before returning, so callers (e.g. craft) read REAL ingredient counts and
+        // can't place phantom clicks for items the server doesn't actually have.
+        let rev = self.inv_revision;
+        let content_deadline = Instant::now() + Duration::from_millis(2000);
+        while self.inv_revision == rev && Instant::now() < content_deadline {
+            if matches!(self.drive_tick().await?, DriveStep::Disconnected) {
+                return Ok(false);
+            }
+        }
         Ok(self.current_window.is_some())
     }
 
