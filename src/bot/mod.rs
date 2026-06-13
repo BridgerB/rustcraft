@@ -884,6 +884,50 @@ impl<'a> Bot<'a> {
         self.find_blocks(name, max_distance, 1).into_iter().next()
     }
 
+    /// Like `find_blocks` but requires only an EXPOSED face (an air/transparent
+    /// neighbour), not strict line-of-sight. Lava/water at or below floor level is
+    /// invisible to the LOS raycast from a standing bot (the sightline grazes the
+    /// floor), yet it's a perfectly valid pour/fill target the bot can walk to. Use
+    /// this for locating fluid pools — NOT for ore (that would be X-ray).
+    pub fn find_exposed_blocks(&self, name: &str, max_distance: i32, count: usize) -> Vec<(i32, i32, i32)> {
+        let Some(def) = self.registry.blocks_by_name.get(name) else {
+            return vec![];
+        };
+        let target_id = def.id;
+        let origin = self.entity.position;
+        let (ox, oy, oz) = (origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
+        let mut results = Vec::new();
+        for dist in 0..=max_distance {
+            for dx in -dist..=dist {
+                for dy in -dist..=dist {
+                    for dz in -dist..=dist {
+                        if dx.abs() != dist && dy.abs() != dist && dz.abs() != dist {
+                            continue;
+                        }
+                        if dx * dx + dy * dy + dz * dz > max_distance * max_distance {
+                            continue;
+                        }
+                        let (x, y, z) = (ox + dx, oy + dy, oz + dz);
+                        let Some(state) = self.world.get_block_state_id(vec3(x as f64, y as f64, z as f64)) else {
+                            continue;
+                        };
+                        if state == 0 {
+                            continue;
+                        }
+                        let matches = self.registry.blocks_by_state_id.get(&state).map(|d| d.id) == Some(target_id);
+                        if matches && self.is_exposed(x, y, z) {
+                            results.push((x, y, z));
+                            if results.len() >= count {
+                                return results;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        results
+    }
+
     fn is_exposed(&self, x: i32, y: i32, z: i32) -> bool {
         for (ox, oy, oz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
             match self.world.get_block_state_id(vec3((x + ox) as f64, (y + oy) as f64, (z + oz) as f64)) {
