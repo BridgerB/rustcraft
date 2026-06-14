@@ -76,53 +76,33 @@ impl Aabb {
     }
 }
 
-pub fn compute_offset_x(bb: Aabb, other: Aabb, offset_x: f64) -> f64 {
-    if other.max_y > bb.min_y
-        && other.min_y < bb.max_y
-        && other.max_z > bb.min_z
-        && other.min_z < bb.max_z
-    {
-        if offset_x > 0.0 && other.max_x <= bb.min_x {
-            return (bb.min_x - other.max_x).min(offset_x);
+/// Sweep-collision offset along one axis: if `other` overlaps `bb` on the two
+/// *perpendicular* axes (`$p1`,`$p2`) and lies ahead of it along the swept axis
+/// (`$ax`), clamp `offset` to just touch. `$ax`/`$p1`/`$p2` name the min/max field
+/// pairs; the body is identical per axis (collision-critical — covered by tests).
+macro_rules! compute_offset_axis {
+    ($name:ident, $off:ident, ($amin:ident,$amax:ident), ($p1min:ident,$p1max:ident), ($p2min:ident,$p2max:ident)) => {
+        #[inline]
+        pub fn $name(bb: Aabb, other: Aabb, $off: f64) -> f64 {
+            if other.$p1max > bb.$p1min
+                && other.$p1min < bb.$p1max
+                && other.$p2max > bb.$p2min
+                && other.$p2min < bb.$p2max
+            {
+                if $off > 0.0 && other.$amax <= bb.$amin {
+                    return (bb.$amin - other.$amax).min($off);
+                }
+                if $off < 0.0 && other.$amin >= bb.$amax {
+                    return (bb.$amax - other.$amin).max($off);
+                }
+            }
+            $off
         }
-        if offset_x < 0.0 && other.min_x >= bb.max_x {
-            return (bb.max_x - other.min_x).max(offset_x);
-        }
-    }
-    offset_x
+    };
 }
-
-pub fn compute_offset_y(bb: Aabb, other: Aabb, offset_y: f64) -> f64 {
-    if other.max_x > bb.min_x
-        && other.min_x < bb.max_x
-        && other.max_z > bb.min_z
-        && other.min_z < bb.max_z
-    {
-        if offset_y > 0.0 && other.max_y <= bb.min_y {
-            return (bb.min_y - other.max_y).min(offset_y);
-        }
-        if offset_y < 0.0 && other.min_y >= bb.max_y {
-            return (bb.max_y - other.min_y).max(offset_y);
-        }
-    }
-    offset_y
-}
-
-pub fn compute_offset_z(bb: Aabb, other: Aabb, offset_z: f64) -> f64 {
-    if other.max_x > bb.min_x
-        && other.min_x < bb.max_x
-        && other.max_y > bb.min_y
-        && other.min_y < bb.max_y
-    {
-        if offset_z > 0.0 && other.max_z <= bb.min_z {
-            return (bb.min_z - other.max_z).min(offset_z);
-        }
-        if offset_z < 0.0 && other.min_z >= bb.max_z {
-            return (bb.max_z - other.min_z).max(offset_z);
-        }
-    }
-    offset_z
-}
+compute_offset_axis!(compute_offset_x, offset_x, (min_x, max_x), (min_y, max_y), (min_z, max_z));
+compute_offset_axis!(compute_offset_y, offset_y, (min_y, max_y), (min_x, max_x), (min_z, max_z));
+compute_offset_axis!(compute_offset_z, offset_z, (min_z, max_z), (min_x, max_x), (min_y, max_y));
 
 #[cfg(test)]
 mod tests {

@@ -235,33 +235,22 @@ fn js_round(n: f64) -> f64 {
 
 // ─── Operator overloads ──────────────────────────────────────────────────────
 
-impl Add for Vec3 {
-    type Output = Vec3;
-    fn add(self, rhs: Vec3) -> Vec3 {
-        Vec3::add(self, rhs)
-    }
+/// Component-wise `Vec3 op Vec3` operator, delegating to the named inherent method
+/// (which carries the actual semantics + tests). One arm per operator.
+macro_rules! impl_vec3_binop {
+    ($trait:ident, $op:ident, $inherent:ident) => {
+        impl $trait for Vec3 {
+            type Output = Vec3;
+            fn $op(self, rhs: Vec3) -> Vec3 {
+                Vec3::$inherent(self, rhs)
+            }
+        }
+    };
 }
-
-impl Sub for Vec3 {
-    type Output = Vec3;
-    fn sub(self, rhs: Vec3) -> Vec3 {
-        Vec3::subtract(self, rhs)
-    }
-}
-
-impl Mul for Vec3 {
-    type Output = Vec3;
-    fn mul(self, rhs: Vec3) -> Vec3 {
-        Vec3::multiply(self, rhs)
-    }
-}
-
-impl Div for Vec3 {
-    type Output = Vec3;
-    fn div(self, rhs: Vec3) -> Vec3 {
-        Vec3::divide(self, rhs)
-    }
-}
+impl_vec3_binop!(Add, add, add);
+impl_vec3_binop!(Sub, sub, subtract);
+impl_vec3_binop!(Mul, mul, multiply);
+impl_vec3_binop!(Div, div, divide);
 
 impl Mul<f64> for Vec3 {
     type Output = Vec3;
