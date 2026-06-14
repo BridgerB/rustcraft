@@ -324,18 +324,18 @@ fn state_id_to_block_nbt(registry: &Registry, state_id: u32) -> NbtTag {
 }
 
 /// Returns (palette nbt entries, bits_per_value, optional bit array for `data`).
-fn block_palette_nbt<'a>(
+/// Serialize a palette container to (entries, bits-per-value, packed data) — the
+/// container walk (Single/Indirect/Direct, with Direct deduping its entries in first-
+/// seen order) is identical for blocks and biomes; only how an id maps to an entry
+/// differs, so that's the `map_id` parameter.
+fn palette_nbt<'a, T>(
     container: &'a PaletteContainer,
-    registry: &Registry,
-) -> (Vec<NbtTag>, u32, Option<&'a BitArray>) {
+    mut map_id: impl FnMut(u32) -> T,
+) -> (Vec<T>, u32, Option<&'a BitArray>) {
     match container {
-        PaletteContainer::Single(c) => (vec![state_id_to_block_nbt(registry, c.value)], 0, None),
+        PaletteContainer::Single(c) => (vec![map_id(c.value)], 0, None),
         PaletteContainer::Indirect(c) => {
-            let entries = c
-                .palette
-                .iter()
-                .map(|&id| state_id_to_block_nbt(registry, id))
-                .collect();
+            let entries = c.palette.iter().map(|&id| map_id(id)).collect();
             (entries, log2_ceil(c.palette.len()), Some(&c.data))
         }
         PaletteContainer::Direct(c) => {
@@ -345,7 +345,7 @@ fn block_palette_nbt<'a>(
                 let id = c.data.get(i);
                 if !seen.contains(&id) {
                     seen.push(id);
-                    entries.push(state_id_to_block_nbt(registry, id));
+                    entries.push(map_id(id));
                 }
             }
             (entries, log2_ceil(seen.len()), Some(&c.data))
@@ -353,36 +353,24 @@ fn block_palette_nbt<'a>(
     }
 }
 
+fn block_palette_nbt<'a>(
+    container: &'a PaletteContainer,
+    registry: &Registry,
+) -> (Vec<NbtTag>, u32, Option<&'a BitArray>) {
+    palette_nbt(container, |id| state_id_to_block_nbt(registry, id))
+}
+
 fn biome_palette_nbt<'a>(
     container: &'a PaletteContainer,
     registry: &Registry,
 ) -> (Vec<String>, u32, Option<&'a BitArray>) {
-    let biome_name = |id: u32| {
+    palette_nbt(container, |id| {
         registry
             .biomes_by_id
             .get(&(id as i32))
             .map(|b| format!("minecraft:{}", b.name))
             .unwrap_or_else(|| "minecraft:plains".to_string())
-    };
-    match container {
-        PaletteContainer::Single(c) => (vec![biome_name(c.value)], 0, None),
-        PaletteContainer::Indirect(c) => {
-            let names = c.palette.iter().map(|&id| biome_name(id)).collect();
-            (names, log2_ceil(c.palette.len()), Some(&c.data))
-        }
-        PaletteContainer::Direct(c) => {
-            let mut seen = Vec::new();
-            let mut names = Vec::new();
-            for i in 0..c.data.capacity {
-                let id = c.data.get(i);
-                if !seen.contains(&id) {
-                    seen.push(id);
-                    names.push(biome_name(id));
-                }
-            }
-            (names, log2_ceil(seen.len()), Some(&c.data))
-        }
-    }
+    })
 }
 
 fn serialize_block_entities(col: &ChunkColumn) -> NbtTag {
