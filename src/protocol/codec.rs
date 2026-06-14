@@ -132,27 +132,22 @@ fn read_named(
 
 /// Returns `Some` for built-in primitive/custom types, `None` for named types.
 fn read_primitive(name: &str, buf: &[u8], pos: usize) -> Res<Option<(PValue, usize)>> {
+    // Big-endian fixed-width number → PValue::num(x as f64), advancing `$n` bytes.
+    // (i64/u64/f64 wrap differently, so they stay explicit below.)
+    macro_rules! be_num {
+        ($ty:ty, $n:literal) => {
+            (PValue::num(<$ty>::from_be_bytes(take(buf, pos, $n)?.try_into().unwrap()) as f64), $n)
+        };
+    }
     let r = match name {
         "void" | "native" => (PValue::Void, 0),
         "bool" => (PValue::Bool(take(buf, pos, 1)?[0] != 0), 1),
         "i8" => (PValue::num(take(buf, pos, 1)?[0] as i8 as f64), 1),
         "u8" => (PValue::num(take(buf, pos, 1)?[0] as f64), 1),
-        "i16" => (
-            PValue::num(i16::from_be_bytes(take(buf, pos, 2)?.try_into().unwrap()) as f64),
-            2,
-        ),
-        "u16" => (
-            PValue::num(u16::from_be_bytes(take(buf, pos, 2)?.try_into().unwrap()) as f64),
-            2,
-        ),
-        "i32" => (
-            PValue::num(i32::from_be_bytes(take(buf, pos, 4)?.try_into().unwrap()) as f64),
-            4,
-        ),
-        "u32" => (
-            PValue::num(u32::from_be_bytes(take(buf, pos, 4)?.try_into().unwrap()) as f64),
-            4,
-        ),
+        "i16" => be_num!(i16, 2),
+        "u16" => be_num!(u16, 2),
+        "i32" => be_num!(i32, 4),
+        "u32" => be_num!(u32, 4),
         "i64" => (
             PValue::Long(i64::from_be_bytes(take(buf, pos, 8)?.try_into().unwrap())),
             8,
@@ -161,10 +156,7 @@ fn read_primitive(name: &str, buf: &[u8], pos: usize) -> Res<Option<(PValue, usi
             PValue::ULong(u64::from_be_bytes(take(buf, pos, 8)?.try_into().unwrap())),
             8,
         ),
-        "f32" => (
-            PValue::num(f32::from_be_bytes(take(buf, pos, 4)?.try_into().unwrap()) as f64),
-            4,
-        ),
+        "f32" => be_num!(f32, 4),
         "f64" => (
             PValue::num(f64::from_be_bytes(take(buf, pos, 8)?.try_into().unwrap())),
             8,
@@ -684,15 +676,21 @@ fn write_named(
 }
 
 fn write_primitive(name: &str, value: &PValue, out: &mut Vec<u8>) -> Res<bool> {
+    // Big-endian write of an integer PValue narrowed to `$ty` via as_i64.
+    macro_rules! put_be {
+        ($ty:ty) => {
+            out.extend_from_slice(&(value.as_i64().unwrap_or(0) as $ty).to_be_bytes())
+        };
+    }
     match name {
         "void" | "native" => {}
         "bool" => out.push(value.as_bool().unwrap_or(false) as u8),
         "i8" => out.push(value.as_i64().unwrap_or(0) as i8 as u8),
         "u8" => out.push(value.as_i64().unwrap_or(0) as u8),
-        "i16" => out.extend_from_slice(&(value.as_i64().unwrap_or(0) as i16).to_be_bytes()),
-        "u16" => out.extend_from_slice(&(value.as_i64().unwrap_or(0) as u16).to_be_bytes()),
-        "i32" => out.extend_from_slice(&(value.as_i64().unwrap_or(0) as i32).to_be_bytes()),
-        "u32" => out.extend_from_slice(&(value.as_i64().unwrap_or(0) as u32).to_be_bytes()),
+        "i16" => put_be!(i16),
+        "u16" => put_be!(u16),
+        "i32" => put_be!(i32),
+        "u32" => put_be!(u32),
         "i64" => out.extend_from_slice(&value.as_i64().unwrap_or(0).to_be_bytes()),
         "u64" => {
             let u = match value {
