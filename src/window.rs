@@ -470,6 +470,19 @@ impl Window {
     // ── Search ──
 
     #[allow(clippy::too_many_arguments)]
+    /// First slot index in `start..end` whose (present) item satisfies `pred(index,
+    /// item)`. The slot-walk shared by all the typed finders below.
+    fn find_slot_in(
+        &self,
+        start: usize,
+        end: usize,
+        pred: impl Fn(usize, &Item) -> bool,
+    ) -> Option<usize> {
+        (start..end).find(|&i| {
+            self.slots.get(i).and_then(|s| s.as_ref()).is_some_and(|item| pred(i, item))
+        })
+    }
+
     pub fn find_item_range(
         &self,
         start: usize,
@@ -480,19 +493,13 @@ impl Window {
         nbt: Option<&NbtCompound>,
         skip_craft_result: bool,
     ) -> Option<usize> {
-        for i in start..end {
-            if let Some(item) = self.slots.get(i).and_then(|s| s.as_ref()) {
-                if item_type == item.type_id
-                    && metadata.map(|m| m == item.metadata).unwrap_or(true)
-                    && (!not_full || item.count < item.stack_size)
-                    && nbt_matches(nbt, item.nbt.as_ref())
-                    && !(i as i32 == self.crafting_result_slot && skip_craft_result)
-                {
-                    return Some(i);
-                }
-            }
-        }
-        None
+        self.find_slot_in(start, end, |i, item| {
+            item_type == item.type_id
+                && metadata.map(|m| m == item.metadata).unwrap_or(true)
+                && (!not_full || item.count < item.stack_size)
+                && nbt_matches(nbt, item.nbt.as_ref())
+                && !(i as i32 == self.crafting_result_slot && skip_craft_result)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -536,17 +543,11 @@ impl Window {
         metadata: Option<i32>,
         not_full: bool,
     ) -> Option<usize> {
-        for i in start..end {
-            if let Some(item) = self.slots.get(i).and_then(|s| s.as_ref()) {
-                if item.name == name
-                    && metadata.map(|m| m == item.metadata).unwrap_or(true)
-                    && (!not_full || item.count < item.stack_size)
-                {
-                    return Some(i);
-                }
-            }
-        }
-        None
+        self.find_slot_in(start, end, |_, item| {
+            item.name == name
+                && metadata.map(|m| m == item.metadata).unwrap_or(true)
+                && (!not_full || item.count < item.stack_size)
+        })
     }
 
     pub fn find_inventory_item(
