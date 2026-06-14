@@ -125,6 +125,11 @@ impl<'a> World<'a> {
         self.columns.get(&(chunk_x, chunk_z))
     }
 
+    /// Number of chunk columns currently resident in the local world.
+    pub fn loaded_chunk_count(&self) -> usize {
+        self.columns.len()
+    }
+
     pub fn set_column(&mut self, chunk_x: i32, chunk_z: i32, column: ChunkColumn) {
         self.columns.insert((chunk_x, chunk_z), column);
         self.events

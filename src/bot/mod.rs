@@ -427,11 +427,24 @@ impl<'a> Bot<'a> {
                 }
             }
             "level_chunk_with_light" => {
-                if let Some((cx, cz)) = self.handle_chunk(params) {
-                    return Ok(Some(BotEvent::ChunkLoad(cx, cz)));
+                match self.handle_chunk(params) {
+                    Some((cx, cz)) => {
+                        if std::env::var("CHUNK_DEBUG").is_ok() {
+                            eprintln!("    CHUNK loaded ({cx},{cz}) total={}", self.world.loaded_chunk_count());
+                        }
+                        return Ok(Some(BotEvent::ChunkLoad(cx, cz)));
+                    }
+                    None => {
+                        if std::env::var("CHUNK_DEBUG").is_ok() {
+                            eprintln!("    CHUNK DROPPED (parse failed)");
+                        }
+                    }
                 }
             }
             "chunk_batch_finished" => {
+                if std::env::var("CHUNK_DEBUG").is_ok() {
+                    eprintln!("    CHUNK batch_finished -> ack");
+                }
                 self.client
                     .write("chunk_batch_received", PValue::compound(vec![("chunksPerTick", PValue::num(20.0))]))
                     .await?;
