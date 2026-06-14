@@ -483,17 +483,9 @@ impl<'a> Reader<'a> {
     }
 
     fn read_array_count(&mut self) -> Res<usize> {
-        let count = match self.format {
-            NbtFormat::Big => {
-                let b = self.take(4)?;
-                i32::from_be_bytes([b[0], b[1], b[2], b[3]])
-            }
-            NbtFormat::Little => {
-                let b = self.take(4)?;
-                i32::from_le_bytes([b[0], b[1], b[2], b[3]])
-            }
-            NbtFormat::LittleVarint => self.read_zigzag32()?,
-        };
+        // An array/list count is a plain i32 in every format (zig-zag in littleVarint),
+        // i.e. exactly read_i32 — but it must be non-negative.
+        let count = self.read_i32()?;
         if count < 0 {
             return Err(NbtError::NegativeCount(count));
         }
@@ -626,12 +618,8 @@ impl Writer {
     }
 
     fn write_array_count(&mut self, count: usize) {
-        let count = count as i32;
-        match self.format {
-            NbtFormat::Big => self.buf.extend_from_slice(&count.to_be_bytes()),
-            NbtFormat::Little => self.buf.extend_from_slice(&count.to_le_bytes()),
-            NbtFormat::LittleVarint => self.write_zigzag32(count),
-        }
+        // Mirror of read_array_count: an array/list count is written exactly as an i32.
+        self.write_i32(count as i32);
     }
 
     fn write_payload(&mut self, tag: &NbtTag) {
