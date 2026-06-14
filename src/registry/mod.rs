@@ -121,33 +121,23 @@ impl Registry {
             }
         }
 
-        let mut biomes_by_id = HashMap::new();
-        let mut biomes_by_name = HashMap::new();
-        for biome in &biomes_array {
-            biomes_by_id.insert(biome.id, biome.clone());
-            biomes_by_name.insert(biome.name.clone(), biome.clone());
+        // Each definition type with an `id` and `name` builds the same by_id/by_name
+        // index pair; generate them rather than repeat the loop verbatim. (blocks adds a
+        // by_state_id pass and attributes are name-only, so those stay hand-written.)
+        macro_rules! index_id_name {
+            ($array:expr, $by_id:ident, $by_name:ident) => {
+                let mut $by_id = HashMap::new();
+                let mut $by_name = HashMap::new();
+                for def in &$array {
+                    $by_id.insert(def.id, def.clone());
+                    $by_name.insert(def.name.clone(), def.clone());
+                }
+            };
         }
-
-        let mut items_by_id = HashMap::new();
-        let mut items_by_name = HashMap::new();
-        for item in &items_array {
-            items_by_id.insert(item.id, item.clone());
-            items_by_name.insert(item.name.clone(), item.clone());
-        }
-
-        let mut entities_by_id = HashMap::new();
-        let mut entities_by_name = HashMap::new();
-        for ent in &entities_array {
-            entities_by_id.insert(ent.id, ent.clone());
-            entities_by_name.insert(ent.name.clone(), ent.clone());
-        }
-
-        let mut effects_by_id = HashMap::new();
-        let mut effects_by_name = HashMap::new();
-        for eff in &effects_array {
-            effects_by_id.insert(eff.id, eff.clone());
-            effects_by_name.insert(eff.name.clone(), eff.clone());
-        }
+        index_id_name!(biomes_array, biomes_by_id, biomes_by_name);
+        index_id_name!(items_array, items_by_id, items_by_name);
+        index_id_name!(entities_array, entities_by_id, entities_by_name);
+        index_id_name!(effects_array, effects_by_id, effects_by_name);
 
         let mut attributes_by_name = HashMap::new();
         for attr in &attributes_array {
@@ -213,67 +203,53 @@ fn build_features(data_version: i32) -> HashMap<&'static str, FeatureValue> {
     let older = |v: &str| data_version < version_data(v).unwrap_or(i32::MAX);
     let b = FeatureValue::Bool;
 
+    // Boolean version-gated features: (name, condition). Built once from a table so
+    // adding a flag is a one-line edit. String-valued features (which pick between two
+    // identifiers) follow, since they don't fit the bool shape.
+    let bools: [(&'static str, bool); 33] = [
+        ("village&pillageInventoryWindows", newer("1.14")),
+        ("netherUpdateInventoryWindows", newer("1.16")),
+        ("shieldSlot", newer("1.9")),
+        ("itemSerializationUsesBlockId", older("1.13")),
+        ("booksUseStoredEnchantments", true),
+        ("spawnEggsHaveSpawnedEntityInName", newer("1.13")),
+        ("spawnEggsUseEntityTagInNbt", older("1.13")),
+        ("fixedPointPosition", older("1.9")),
+        ("fixedPointDelta128", older("1.9")),
+        ("entityVelocityIsLpVec3", newer("1.21")),
+        ("playerInfoActionIsBitfield", newer("1.19")),
+        ("armAnimationBeforeUse", newer("1.9")),
+        ("newPlayerInputPacket", newer("1.21")),
+        ("entityActionUsesStringMapper", newer("1.21")),
+        ("spawnRespawnWorldDataField", newer("1.21")),
+        ("dimensionIsAnInt", older("1.16")),
+        ("dimensionIsAString", newer("1.16") && older("1.19")),
+        ("dimensionIsAWorld", newer("1.19")),
+        ("segmentedRegistryCodecData", newer("1.20.5")),
+        ("customChannelMCPrefixed", newer("1.13")),
+        ("stateIdUsed", newer("1.17")),
+        ("useItemWithOwnPacket", newer("1.9")),
+        ("usesBlockStates", newer("1.13")),
+        ("usesMultiblockSingleLong", newer("1.16")),
+        ("blockPlaceHasInsideBlock", newer("1.19")),
+        ("blockPlaceHasHandAndFloatCursor", newer("1.9") && older("1.19")),
+        ("blockPlaceHasHandAndIntCursor", older("1.9")),
+        ("chatPacketsUseNbtComponents", newer("1.20")),
+        ("independentLiquidGravity", newer("1.13")),
+        ("velocityBlocksOnTop", newer("1.9")),
+        ("climbUsingJump", older("1.14")),
+        ("climbableTrapdoor", newer("1.9")),
+        ("respawnIsPayload", newer("1.20")),
+    ];
     let mut f: HashMap<&'static str, FeatureValue> = HashMap::new();
-    f.insert("village&pillageInventoryWindows", b(newer("1.14")));
-    f.insert("netherUpdateInventoryWindows", b(newer("1.16")));
-    f.insert("shieldSlot", b(newer("1.9")));
-    f.insert("itemSerializationUsesBlockId", b(older("1.13")));
-    f.insert(
-        "nbtNameForEnchant",
-        if newer("1.13") {
-            FeatureValue::Str("Enchantments")
-        } else {
-            FeatureValue::Str("ench")
-        },
-    );
-    f.insert(
-        "typeOfValueForEnchantLevel",
-        if newer("1.13") {
-            FeatureValue::Str("string")
-        } else {
-            FeatureValue::Str("short")
-        },
-    );
-    f.insert("booksUseStoredEnchantments", b(true));
-    f.insert(
-        "whereDurabilityIsSerialized",
-        if newer("1.13") {
-            FeatureValue::Str("Damage")
-        } else {
-            FeatureValue::Str("metadata")
-        },
-    );
-    f.insert("spawnEggsHaveSpawnedEntityInName", b(newer("1.13")));
-    f.insert("spawnEggsUseEntityTagInNbt", b(older("1.13")));
-    f.insert("fixedPointPosition", b(older("1.9")));
-    f.insert("fixedPointDelta128", b(older("1.9")));
-    f.insert("entityVelocityIsLpVec3", b(newer("1.21")));
-    f.insert("playerInfoActionIsBitfield", b(newer("1.19")));
-    f.insert("armAnimationBeforeUse", b(newer("1.9")));
-    f.insert("newPlayerInputPacket", b(newer("1.21")));
-    f.insert("entityActionUsesStringMapper", b(newer("1.21")));
-    f.insert("spawnRespawnWorldDataField", b(newer("1.21")));
-    f.insert("dimensionIsAnInt", b(older("1.16")));
-    f.insert("dimensionIsAString", b(newer("1.16") && older("1.19")));
-    f.insert("dimensionIsAWorld", b(newer("1.19")));
-    f.insert("segmentedRegistryCodecData", b(newer("1.20.5")));
-    f.insert("customChannelMCPrefixed", b(newer("1.13")));
-    f.insert("stateIdUsed", b(newer("1.17")));
-    f.insert("useItemWithOwnPacket", b(newer("1.9")));
-    f.insert("usesBlockStates", b(newer("1.13")));
-    f.insert("usesMultiblockSingleLong", b(newer("1.16")));
-    f.insert("blockPlaceHasInsideBlock", b(newer("1.19")));
-    f.insert(
-        "blockPlaceHasHandAndFloatCursor",
-        b(newer("1.9") && older("1.19")),
-    );
-    f.insert("blockPlaceHasHandAndIntCursor", b(older("1.9")));
-    f.insert("chatPacketsUseNbtComponents", b(newer("1.20")));
-    f.insert("independentLiquidGravity", b(newer("1.13")));
-    f.insert("velocityBlocksOnTop", b(newer("1.9")));
-    f.insert("climbUsingJump", b(older("1.14")));
-    f.insert("climbableTrapdoor", b(newer("1.9")));
-    f.insert("respawnIsPayload", b(newer("1.20")));
+    for (name, cond) in bools {
+        f.insert(name, b(cond));
+    }
+    let str_feat =
+        |cond: bool, yes: &'static str, no: &'static str| FeatureValue::Str(if cond { yes } else { no });
+    f.insert("nbtNameForEnchant", str_feat(newer("1.13"), "Enchantments", "ench"));
+    f.insert("typeOfValueForEnchantLevel", str_feat(newer("1.13"), "string", "short"));
+    f.insert("whereDurabilityIsSerialized", str_feat(newer("1.13"), "Damage", "metadata"));
     f
 }
 
