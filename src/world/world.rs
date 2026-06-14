@@ -45,6 +45,26 @@ fn to_local(c: f64) -> i32 {
     (c.floor() as i32).rem_euclid(16)
 }
 
+/// A get/set accessor pair that forwards to the chunk column's same-named method:
+/// the getter resolves the column read-only, the setter resolves it mutably and
+/// queues a save. block-light, sky-light and biome id share this shape exactly.
+macro_rules! col_accessor {
+    ($get:ident, $set:ident, $ty:ty) => {
+        pub fn $get(&self, pos: Vec3) -> Option<$ty> {
+            let col = self.columns.get(&(to_chunk(pos.x), to_chunk(pos.z)))?;
+            Some(col.$get(to_local(pos.x), pos.y.floor() as i32, to_local(pos.z)))
+        }
+        pub fn $set(&mut self, pos: Vec3, value: $ty) {
+            let (lx, y, lz) = (to_local(pos.x), pos.y.floor() as i32, to_local(pos.z));
+            let (cx, cz) = (to_chunk(pos.x), to_chunk(pos.z));
+            if let Some(col) = self.column_at(pos) {
+                col.$set(lx, y, lz, value);
+            }
+            self.queue_save(cx, cz);
+        }
+    };
+}
+
 impl<'a> World<'a> {
     pub fn new(registry: &'a Registry) -> World<'a> {
         World {
@@ -198,47 +218,9 @@ impl<'a> World<'a> {
 
     // ── Light / biome access ──
 
-    pub fn get_block_light(&self, pos: Vec3) -> Option<u32> {
-        let col = self.columns.get(&(to_chunk(pos.x), to_chunk(pos.z)))?;
-        Some(col.get_block_light(to_local(pos.x), pos.y.floor() as i32, to_local(pos.z)))
-    }
-
-    pub fn set_block_light(&mut self, pos: Vec3, light: u32) {
-        let (lx, y, lz) = (to_local(pos.x), pos.y.floor() as i32, to_local(pos.z));
-        let (cx, cz) = (to_chunk(pos.x), to_chunk(pos.z));
-        if let Some(col) = self.column_at(pos) {
-            col.set_block_light(lx, y, lz, light);
-        }
-        self.queue_save(cx, cz);
-    }
-
-    pub fn get_sky_light(&self, pos: Vec3) -> Option<u32> {
-        let col = self.columns.get(&(to_chunk(pos.x), to_chunk(pos.z)))?;
-        Some(col.get_sky_light(to_local(pos.x), pos.y.floor() as i32, to_local(pos.z)))
-    }
-
-    pub fn set_sky_light(&mut self, pos: Vec3, light: u32) {
-        let (lx, y, lz) = (to_local(pos.x), pos.y.floor() as i32, to_local(pos.z));
-        let (cx, cz) = (to_chunk(pos.x), to_chunk(pos.z));
-        if let Some(col) = self.column_at(pos) {
-            col.set_sky_light(lx, y, lz, light);
-        }
-        self.queue_save(cx, cz);
-    }
-
-    pub fn get_biome_id(&self, pos: Vec3) -> Option<u32> {
-        let col = self.columns.get(&(to_chunk(pos.x), to_chunk(pos.z)))?;
-        Some(col.get_biome_id(to_local(pos.x), pos.y.floor() as i32, to_local(pos.z)))
-    }
-
-    pub fn set_biome_id(&mut self, pos: Vec3, biome_id: u32) {
-        let (lx, y, lz) = (to_local(pos.x), pos.y.floor() as i32, to_local(pos.z));
-        let (cx, cz) = (to_chunk(pos.x), to_chunk(pos.z));
-        if let Some(col) = self.column_at(pos) {
-            col.set_biome_id(lx, y, lz, biome_id);
-        }
-        self.queue_save(cx, cz);
-    }
+    col_accessor!(get_block_light, set_block_light, u32);
+    col_accessor!(get_sky_light, set_sky_light, u32);
+    col_accessor!(get_biome_id, set_biome_id, u32);
 
     // ── Saving ──
 
