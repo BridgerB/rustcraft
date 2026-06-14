@@ -355,6 +355,56 @@ pub fn equal_nbt(a: &NbtTag, b: &NbtTag) -> bool {
 
 // ─── Reader ──────────────────────────────────────────────────────────────────
 
+// The fixed-width numeric read/write methods differ only by type, byte count, and
+// (for the integers) whether littleVarint zig-zags instead of writing raw LE. Generate
+// them so the three wire formats aren't triplicated by hand. `_zz` variants take a
+// zig-zag method name for the littleVarint arm; the plain variants treat
+// littleVarint == little (raw LE), which is correct for i16/f32/f64.
+macro_rules! nbt_read_num {
+    ($name:ident, $ty:ty, $n:literal) => {
+        fn $name(&mut self) -> Res<$ty> {
+            let arr: [u8; $n] = self.take($n)?.try_into().unwrap();
+            Ok(match self.format {
+                NbtFormat::Big => <$ty>::from_be_bytes(arr),
+                _ => <$ty>::from_le_bytes(arr),
+            })
+        }
+    };
+    ($name:ident, $ty:ty, $n:literal, $zigzag:ident) => {
+        fn $name(&mut self) -> Res<$ty> {
+            match self.format {
+                NbtFormat::LittleVarint => self.$zigzag(),
+                _ => {
+                    let arr: [u8; $n] = self.take($n)?.try_into().unwrap();
+                    Ok(match self.format {
+                        NbtFormat::Big => <$ty>::from_be_bytes(arr),
+                        _ => <$ty>::from_le_bytes(arr),
+                    })
+                }
+            }
+        }
+    };
+}
+macro_rules! nbt_write_num {
+    ($name:ident, $ty:ty) => {
+        fn $name(&mut self, value: $ty) {
+            match self.format {
+                NbtFormat::Big => self.buf.extend_from_slice(&value.to_be_bytes()),
+                _ => self.buf.extend_from_slice(&value.to_le_bytes()),
+            }
+        }
+    };
+    ($name:ident, $ty:ty, $zigzag:ident) => {
+        fn $name(&mut self, value: $ty) {
+            match self.format {
+                NbtFormat::Big => self.buf.extend_from_slice(&value.to_be_bytes()),
+                NbtFormat::Little => self.buf.extend_from_slice(&value.to_le_bytes()),
+                NbtFormat::LittleVarint => self.$zigzag(value),
+            }
+        }
+    };
+}
+
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -385,60 +435,11 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0] as i8)
     }
 
-    fn read_i16(&mut self) -> Res<i16> {
-        let b = self.take(2)?;
-        let arr = [b[0], b[1]];
-        Ok(match self.format {
-            NbtFormat::Big => i16::from_be_bytes(arr),
-            _ => i16::from_le_bytes(arr),
-        })
-    }
-
-    fn read_i32(&mut self) -> Res<i32> {
-        match self.format {
-            NbtFormat::Big => {
-                let b = self.take(4)?;
-                Ok(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-            }
-            NbtFormat::Little => {
-                let b = self.take(4)?;
-                Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            }
-            NbtFormat::LittleVarint => self.read_zigzag32(),
-        }
-    }
-
-    fn read_i64(&mut self) -> Res<i64> {
-        match self.format {
-            NbtFormat::Big => {
-                let b = self.take(8)?;
-                Ok(i64::from_be_bytes(b.try_into().unwrap()))
-            }
-            NbtFormat::Little => {
-                let b = self.take(8)?;
-                Ok(i64::from_le_bytes(b.try_into().unwrap()))
-            }
-            NbtFormat::LittleVarint => self.read_zigzag64(),
-        }
-    }
-
-    fn read_f32(&mut self) -> Res<f32> {
-        let b = self.take(4)?;
-        let arr = [b[0], b[1], b[2], b[3]];
-        Ok(match self.format {
-            NbtFormat::Big => f32::from_be_bytes(arr),
-            _ => f32::from_le_bytes(arr),
-        })
-    }
-
-    fn read_f64(&mut self) -> Res<f64> {
-        let b = self.take(8)?;
-        let arr: [u8; 8] = b.try_into().unwrap();
-        Ok(match self.format {
-            NbtFormat::Big => f64::from_be_bytes(arr),
-            _ => f64::from_le_bytes(arr),
-        })
-    }
+    nbt_read_num!(read_i16, i16, 2);
+    nbt_read_num!(read_i32, i32, 4, read_zigzag32);
+    nbt_read_num!(read_i64, i64, 8, read_zigzag64);
+    nbt_read_num!(read_f32, f32, 4);
+    nbt_read_num!(read_f64, f64, 8);
 
     /// Unsigned LEB128 (used by littleVarint for lengths and as zig-zag base).
     fn read_uvarint(&mut self) -> Res<u64> {
@@ -586,42 +587,11 @@ impl Writer {
         }
     }
 
-    fn write_i16(&mut self, value: i16) {
-        match self.format {
-            NbtFormat::Big => self.buf.extend_from_slice(&value.to_be_bytes()),
-            _ => self.buf.extend_from_slice(&value.to_le_bytes()),
-        }
-    }
-
-    fn write_i32(&mut self, value: i32) {
-        match self.format {
-            NbtFormat::Big => self.buf.extend_from_slice(&value.to_be_bytes()),
-            NbtFormat::Little => self.buf.extend_from_slice(&value.to_le_bytes()),
-            NbtFormat::LittleVarint => self.write_zigzag32(value),
-        }
-    }
-
-    fn write_i64(&mut self, value: i64) {
-        match self.format {
-            NbtFormat::Big => self.buf.extend_from_slice(&value.to_be_bytes()),
-            NbtFormat::Little => self.buf.extend_from_slice(&value.to_le_bytes()),
-            NbtFormat::LittleVarint => self.write_zigzag64(value),
-        }
-    }
-
-    fn write_f32(&mut self, value: f32) {
-        match self.format {
-            NbtFormat::Big => self.buf.extend_from_slice(&value.to_be_bytes()),
-            _ => self.buf.extend_from_slice(&value.to_le_bytes()),
-        }
-    }
-
-    fn write_f64(&mut self, value: f64) {
-        match self.format {
-            NbtFormat::Big => self.buf.extend_from_slice(&value.to_be_bytes()),
-            _ => self.buf.extend_from_slice(&value.to_le_bytes()),
-        }
-    }
+    nbt_write_num!(write_i16, i16);
+    nbt_write_num!(write_i32, i32, write_zigzag32);
+    nbt_write_num!(write_i64, i64, write_zigzag64);
+    nbt_write_num!(write_f32, f32);
+    nbt_write_num!(write_f64, f64);
 
     fn write_uvarint(&mut self, mut v: u64) {
         while v > 0x7f {
