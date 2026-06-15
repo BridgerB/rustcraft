@@ -63,6 +63,16 @@ impl<'a> Bot<'a> {
         let slot = |x: usize, y: usize| -> i32 { (1 + x + w * y) as i32 };
 
         for _ in 0..times.max(1) {
+            // Start each craft with an EMPTY cursor. A previous op (e.g. the stick
+            // pre-craft before a pickaxe) can leave a stray stack selected, and the
+            // first grid click would then dump it into the table — the server reads the
+            // stray plank as a *button* recipe and the real item never appears (we saw
+            // bots loop forever crafting buttons under load). Deposit any held stack back
+            // into the inventory before touching the grid.
+            if self.window_selected().is_some() {
+                let (inv_start, inv_end) = self.active_inventory_range();
+                self.put_selected_item_range(inv_start, inv_end, inv_start as i32).await?;
+            }
             // Determine which slots the recipe leaves unused (for shapeless placement).
             let mut unused: Vec<i32> = Vec::new();
             if let Some(shape) = &recipe.in_shape {
