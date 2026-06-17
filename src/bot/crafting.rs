@@ -73,6 +73,14 @@ impl<'a> Bot<'a> {
                 let (inv_start, inv_end) = self.active_inventory_range();
                 self.put_selected_item_range(inv_start, inv_end, inv_start as i32).await?;
             }
+            // Clear any items left in the crafting GRID by a prior corrupt attempt so we
+            // start from an empty grid — a single stray item changes which recipe the
+            // table matches (a lone plank → button instead of the intended item).
+            for s in 1..=(w * h) as i32 {
+                if self.active_slot(s as usize).is_some() {
+                    self.put_away(s).await?;
+                }
+            }
             // Determine which slots the recipe leaves unused (for shapeless placement).
             let mut unused: Vec<i32> = Vec::new();
             if let Some(shape) = &recipe.in_shape {
@@ -107,7 +115,8 @@ impl<'a> Bot<'a> {
             // then sees a stray single plank = a button recipe, not a pickaxe).
             let mut held_source: Option<i32> = None;
 
-            // Place shaped ingredients.
+            // Place shaped ingredients (verified grab each, so a desynced window can't
+            // poison the grid with the wrong item).
             if let Some(shape) = &recipe.in_shape {
                 for y in 0..shape.len() {
                     let row = &shape[y];
@@ -116,22 +125,9 @@ impl<'a> Bot<'a> {
                         if ingredient.id == -1 {
                             continue;
                         }
-                        let held_matches = self
-                            .window_selected()
-                            .map(|t| ingredient_matches(t, ingredient))
-                            .unwrap_or(false);
-                        if !held_matches {
-                            if let Some(hs) = held_source.take() {
-                                self.click_window(hs, 0, 0).await?;
-                            }
-                            let src = self
-                                .active_window_ref()
-                                .and_then(|win| find_ingredient_slot(win, ingredient))
-                                .ok_or_else(|| missing(ingredient))?;
-                            let src = src as i32;
-                            original_source.get_or_insert(src);
-                            self.click_window(src, 0, 0).await?;
-                            held_source = Some(src);
+                        self.ensure_holding(ingredient, &mut held_source).await?;
+                        if original_source.is_none() {
+                            original_source = held_source;
                         }
                         self.click_window(slot(x, y), 1, 0).await?; // right-click: drop one
                     }
@@ -144,22 +140,9 @@ impl<'a> Bot<'a> {
                     let dest = unused.pop().ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::Other, "no free crafting slots")
                     })?;
-                    let held_matches = self
-                        .window_selected()
-                        .map(|t| ingredient_matches(t, ingredient))
-                        .unwrap_or(false);
-                    if !held_matches {
-                        if let Some(hs) = held_source.take() {
-                            self.click_window(hs, 0, 0).await?;
-                        }
-                        let src = self
-                            .active_window_ref()
-                            .and_then(|win| find_ingredient_slot(win, ingredient))
-                            .ok_or_else(|| missing(ingredient))?;
-                        let src = src as i32;
-                        original_source.get_or_insert(src);
-                        self.click_window(src, 0, 0).await?;
-                        held_source = Some(src);
+                    self.ensure_holding(ingredient, &mut held_source).await?;
+                    if original_source.is_none() {
+                        original_source = held_source;
                     }
                     self.click_window(dest, 1, 0).await?;
                 }
@@ -182,15 +165,56 @@ impl<'a> Bot<'a> {
                 }
             }
 
-            self.put_away(0).await?; // take the crafted result
-
-            for s in 0..=(w * h) as i32 {
+            // VERIFY the result is the item we intended before collecting it. Under load
+            // the grid can desync and the table computes a DIFFERENT recipe (a stray
+            // plank → a button); collecting that hoards junk while the real item never
+            // appears, looping forever. Take slot 0 only when it matches recipe.result.
+            let result_ok = self.active_slot(0).map(|it| it.type_id == recipe.result.id).unwrap_or(false);
+            if result_ok {
+                self.put_away(0).await?; // collect the intended result
+            }
+            // Return the GRID ingredients to the inventory. Emptying the grid makes the
+            // server recompute the result slot to empty, so a WRONG result is discarded
+            // (not collected) and the grid is clean for the next attempt.
+            for s in 1..=(w * h) as i32 {
                 if self.active_slot(s as usize).is_some() {
                     self.put_away(s).await?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Grab `ingredient` onto the cursor, VERIFYING the cursor actually holds it
+    /// afterward. Under load the local window desyncs from the server, so a single
+    /// find+grab can land the wrong slot — then a stray item poisons the grid and the
+    /// table computes e.g. a button instead of the intended recipe. `click_window`'s ack
+    /// re-syncs the window from the server, so we re-find and re-grab from the corrected
+    /// state up to a few times. Already holding the right ingredient (placing the 2nd of
+    /// a stack) is a no-op. `held_source` tracks the slot to return the held stack to.
+    async fn ensure_holding(
+        &mut self,
+        ingredient: &RecipeItem,
+        held_source: &mut Option<i32>,
+    ) -> std::io::Result<()> {
+        if self.window_selected().map(|t| ingredient_matches(t, ingredient)).unwrap_or(false) {
+            return Ok(());
+        }
+        for _ in 0..4 {
+            if let Some(hs) = held_source.take() {
+                self.click_window(hs, 0, 0).await?;
+            }
+            let src = self
+                .active_window_ref()
+                .and_then(|win| find_ingredient_slot(win, ingredient))
+                .ok_or_else(|| missing(ingredient))? as i32;
+            self.click_window(src, 0, 0).await?;
+            *held_source = Some(src);
+            if self.window_selected().map(|t| ingredient_matches(t, ingredient)).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+        Err(missing(ingredient))
     }
 
     // ── small accessors used by craft (avoid borrow tangles) ──
